@@ -1,0 +1,30 @@
+{
+  "idGrammar": {
+    "pattern": "RUST-\\d{3}",
+    "headingPrefix": "RUST-",
+    "seriesPattern": "^(RUST)-",
+    "subtypes": []
+  },
+  "tag": {
+    "keyword": "Verifies:",
+    "commentMarkers": ["///", "//", "/*", "*/", "*"],
+    "collectors": [
+      {
+        "lang": "comment",
+        "fileSuffix": ".rs",
+        "testMarkers": ["#[test]", "#[tokio::test]"],
+        "namePattern": "fn\\s+([A-Za-z0-9_]+)"
+      }
+    ]
+  },
+  "coverage": {"default": "unit", "rules": []},
+  "classification": {
+    "classField": "Class",
+    "reasonField": "Reason",
+    "values": [
+      {"name": "checked"},
+      {"name": "unchecked", "requiresReason": true}
+    ]
+  },
+  "matrix": {"generatedBy": "`trace-check`"}
+}
