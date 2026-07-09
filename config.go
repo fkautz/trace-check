@@ -471,10 +471,15 @@ func (c *Config) Validate() error {
 	if err != nil {
 		return fmt.Errorf("idGrammar.pattern (plain heading): %w", err)
 	}
-	if strings.TrimSpace(c.IDGrammar.HeadingPrefix) == "" {
-		return fmt.Errorf("idGrammar.headingPrefix is required")
+	// Empty HeadingPrefix disables loose malformed-heading detection (useful when
+	// IDs span many series prefixes, e.g. DIGEST-1 / TERRAPIN-4 / ENC-BD-5).
+	var loose *regexp.Regexp
+	if strings.TrimSpace(c.IDGrammar.HeadingPrefix) != "" {
+		loose = regexp.MustCompile(`^###\s+` + regexp.QuoteMeta(c.IDGrammar.HeadingPrefix))
+	} else {
+		// Never matches — malformed-prefix reporting is off.
+		loose = regexp.MustCompile(`^\b\B`) // impossible
 	}
-	loose := regexp.MustCompile(`^###\s+` + regexp.QuoteMeta(c.IDGrammar.HeadingPrefix))
 
 	var series *regexp.Regexp
 	if c.IDGrammar.SeriesPattern != "" {
