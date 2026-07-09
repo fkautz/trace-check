@@ -482,3 +482,175 @@ func TestUnknownProfile(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+// policyWaiverCfg is a config with one strict policy rule requiring
+// conformance coverage on Kind: encoding requirements.
+func policyWaiverCfg(t *testing.T) Config {
+	t.Helper()
+	cfg := Default()
+	cfg.Catalog.Fields = []CatalogField{
+		{Name: "Kind", Required: true, Enum: []string{"encoding"}},
+	}
+	cfg.Coverage.Rules = []CoverageRule{
+		{Class: "conformance", PathPrefixes: []string{"conformance/"}},
+	}
+	cfg.Policy.Rules = []PolicyRule{
+		{When: map[string][]string{"Kind": {"encoding"}}, StrictRequiresCoverageClass: "conformance"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+const policyWaiverCatalog = `# Catalog
+### REQ-CORE-001
+- Section: §1
+- Keyword: MUST
+- Kind: encoding
+`
+
+func runPolicyWaiver(t *testing.T, cfg Config, waivers string) (error, string) {
+	t.Helper()
+	root := writeRepo(t, policyWaiverCatalog, "", waivers)
+	var out strings.Builder
+	err := Check(&cfg, Scope{
+		Root:    root,
+		Catalog: filepath.Join(root, "spec", "requirements.md"),
+		Waivers: filepath.Join(root, "spec", "waivers.md"),
+		Strict:  true,
+	}, &out)
+	return err, out.String()
+}
+
+func TestPolicyWaiverReasonsSatisfy(t *testing.T) {
+	// A deliberate-excusal waiver satisfies the policy rule under strict.
+	err, out := runPolicyWaiver(t, policyWaiverCfg(t), `# Waivers
+### REQ-CORE-001
+- Reason: documented-deviation
+- Rationale: deviates per ADR-7.
+`)
+	if err != nil {
+		t.Fatalf("documented-deviation should satisfy policy: %v\n%s", err, out)
+	}
+
+	// A not-implemented placeholder satisfies base coverage but NOT the rule.
+	err, out = runPolicyWaiver(t, policyWaiverCfg(t), `# Waivers
+### REQ-CORE-001
+- Reason: not-implemented
+- Rationale: later.
+`)
+	if err == nil || !strings.Contains(out, "policy requires conformance coverage") {
+		t.Fatalf("not-implemented should not satisfy policy: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "no tagged test or waiver") {
+		t.Fatalf("waiver should still satisfy base strict coverage:\n%s", out)
+	}
+
+	// An explicit empty list disables waiver satisfaction entirely.
+	cfg := policyWaiverCfg(t)
+	cfg.Policy.WaiverReasonsSatisfy = []string{}
+	err, out = runPolicyWaiver(t, cfg, `# Waivers
+### REQ-CORE-001
+- Reason: documented-deviation
+- Rationale: deviates per ADR-7.
+`)
+	if err == nil || !strings.Contains(out, "policy requires conformance coverage") {
+		t.Fatalf("empty waiverReasonsSatisfy should disable satisfaction: %v\n%s", err, out)
+	}
+}
+
+func TestPolicyWaiverReasonsSatisfyValidation(t *testing.T) {
+	cfg := Default()
+	cfg.Policy.WaiverReasonsSatisfy = []string{"no-such-reason"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "no-such-reason") {
+		t.Fatalf("want validation error naming the bad reason, got %v", err)
+	}
+}
+
+func TestClassificationStrictWaiverSatisfies(t *testing.T) {
+	// The same waiver semantics apply to classification strictRequires.
+	cfg := Default()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	catalog := `# Catalog
+### REQ-CORE-001
+- Section: §1
+- Keyword: MUST
+`
+	classification := `# Classification
+### REQ-CORE-001
+- Class: wire-observable
+`
+	waivers := `# Waivers
+### REQ-CORE-001
+- Reason: documented-deviation
+- Rationale: deviates per ADR-7.
+`
+	root := writeRepo(t, catalog, "", waivers)
+	mustWriteFile(t, root, "spec/classification.md", classification)
+	var out strings.Builder
+	err := Check(&cfg, Scope{
+		Root:           root,
+		Catalog:        filepath.Join(root, "spec", "requirements.md"),
+		Classification: filepath.Join(root, "spec", "classification.md"),
+		Waivers:        filepath.Join(root, "spec", "waivers.md"),
+		Strict:         true,
+	}, &out)
+	if err != nil {
+		t.Fatalf("documented-deviation should satisfy classification strict class: %v\n%s", err, out.String())
+	}
+}
+
+func TestPolicyCoveredByWaiverNeedsRealCoverage(t *testing.T) {
+	catalog := `# Catalog
+### REQ-CORE-001
+- Section: §1
+- Keyword: MUST
+- Kind: encoding
+### REQ-CORE-002
+- Section: §1
+- Keyword: MUST
+- Kind: encoding
+`
+	waivers := `# Waivers
+### REQ-CORE-002
+- Reason: covered-by
+- Covers: REQ-CORE-001
+- Rationale: special case of 001.
+`
+	run := func(t *testing.T, conformanceTag bool) (error, string) {
+		t.Helper()
+		cfg := policyWaiverCfg(t)
+		root := writeRepo(t, catalog, "", waivers)
+		mustWriteFile(t, root, "unit_test.go",
+			"package p\nimport \"testing\"\n// Verifies: REQ-CORE-001\nfunc TestUnit(t *testing.T) {}\n")
+		if conformanceTag {
+			mustWriteFile(t, root, "conformance/enc_test.go",
+				"package conformance\nimport \"testing\"\n// Verifies: REQ-CORE-001\nfunc TestEnc(t *testing.T) {}\n")
+		}
+		var out strings.Builder
+		err := Check(&cfg, Scope{
+			Root:    root,
+			Catalog: filepath.Join(root, "spec", "requirements.md"),
+			Waivers: filepath.Join(root, "spec", "waivers.md"),
+			Strict:  true,
+		}, &out)
+		return err, out.String()
+	}
+
+	// Target has only unit coverage: the covered-by waiver must NOT satisfy
+	// the conformance policy rule for 002 (and 001 itself also fails).
+	err, out := run(t, false)
+	if err == nil || !strings.Contains(out, "REQ-CORE-002 (§1): policy requires conformance coverage") {
+		t.Fatalf("covered-by without target conformance coverage should not satisfy: %v\n%s", err, out)
+	}
+
+	// Target carries a conformance tag: both 001 (tagged) and 002 (covered-by
+	// proxy to a conformance-covered target) pass.
+	err, out = run(t, true)
+	if err != nil {
+		t.Fatalf("covered-by with conformance-covered target should satisfy: %v\n%s", err, out)
+	}
+}

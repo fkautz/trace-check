@@ -279,6 +279,11 @@ CONFIG (-config FILE, JSON)
     policy.rules[]             {when, strictRequiresCoverageClass,
                                forbidsCoverageClass, allowUncovered}
                                when keys: catalog meta fields or "KeywordClass"
+    policy.waiverReasonsSatisfy[]  waiver reasons that satisfy a
+                               strictRequiresCoverageClass rule (default
+                               covered-by, documented-deviation; [] = none).
+                               covered-by only counts when its Covers target
+                               carries a tag of the required coverage class
     strict.phases[]            Phase meta values in scope under -strict
     strict.keywordClasses[]    policy classes in scope under -strict (e.g. must)
     strict.phaseField          meta field for phase (default "Phase")
@@ -368,7 +373,9 @@ PROBLEMS AND FIXES (each is printed as "  PROBLEM: <id>: <message>")
   classified X but has a Y tag (stale)      reclassify, or remove the Y-class tag
   <value> but has no <class> coverage (-strict)
                                             add a test of that coverage class
-  policy requires <class> coverage          add a tag of that coverage class
+  policy requires <class> coverage          add a tag of that coverage class, or
+                                            waive with a deliberate-excusal reason
+                                            (policy.waiverReasonsSatisfy)
   policy forbids <class> coverage           remove the forbidden-class tag
 
 EXAMPLES

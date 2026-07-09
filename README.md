@@ -100,6 +100,15 @@ Architecture file shape:
 - I-VERIFY — no exposure before verify
 ```
 
+Waivers vs. policy rules: a waiver always satisfies base `-strict` coverage,
+but a `strictRequiresCoverageClass` rule is only satisfied by a waiver whose
+reason is a *deliberate excusal* — by default `covered-by` and
+`documented-deviation`. A `not-implemented` placeholder does not pass a freeze
+gate, and a `covered-by` waiver only counts when its `Covers` target itself
+carries a tag of the required coverage class (evidence by proxy, not by
+assertion). Tune with `policy.waiverReasonsSatisfy` (an explicit `[]` means no
+waiver satisfies a policy rule).
+
 Structured covered-by (optional but recommended):
 
 ```markdown

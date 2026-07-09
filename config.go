@@ -193,6 +193,16 @@ type ArchitectureConfig struct {
 // PolicyConfig holds when→coverage rules driven by catalog metadata.
 type PolicyConfig struct {
 	Rules []PolicyRule `json:"rules"`
+	// WaiverReasonsSatisfy lists the waiver reasons that satisfy a matching
+	// rule's StrictRequiresCoverageClass (and a classification value's
+	// StrictRequiresCoverageClass). Default: covered-by, documented-deviation —
+	// a deliberate excusal counts at freeze time, but a not-implemented
+	// placeholder does not. The covered-by reason is evidence by proxy: it
+	// only satisfies when the waiver's Covers target itself carries a tag of
+	// the required coverage class. An explicit empty array means no waiver
+	// satisfies a policy coverage requirement. Every entry must be an allowed
+	// waiver reason (waivers.reasons).
+	WaiverReasonsSatisfy []string `json:"waiverReasonsSatisfy"`
 }
 
 // PolicyRule applies coverage constraints when a requirement's metadata matches.
@@ -346,6 +356,9 @@ func Default() Config {
 			ComponentSection: "Components",
 			InvariantSection: "Invariants",
 		},
+		Policy: PolicyConfig{
+			WaiverReasonsSatisfy: []string{"covered-by", "documented-deviation"},
+		},
 		Strict: StrictConfig{
 			PhaseField: "Phase",
 		},
@@ -381,6 +394,7 @@ func LoadConfig(path string) (Config, error) {
 	cfg.Catalog.Fields = nil
 	cfg.Matrix.CoverageColumns = nil
 	cfg.Policy.Rules = nil
+	cfg.Policy.WaiverReasonsSatisfy = nil
 	cfg.Strict.Phases = nil
 	cfg.Strict.KeywordClasses = nil
 	cfg.Profiles = nil
@@ -423,6 +437,19 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if cfg.Policy.Rules == nil {
 		cfg.Policy.Rules = base.Policy.Rules
+	}
+	if cfg.Policy.WaiverReasonsSatisfy == nil {
+		// Omitted: default to the built-in list filtered to the (possibly
+		// overridden) allowed waiver reasons, so a custom reasons vocabulary
+		// does not have to name this field to stay valid. An explicit empty
+		// array remains "no waiver satisfies".
+		filtered := []string{}
+		for _, r := range base.Policy.WaiverReasonsSatisfy {
+			if stringIn(cfg.Waivers.Reasons, r) {
+				filtered = append(filtered, r)
+			}
+		}
+		cfg.Policy.WaiverReasonsSatisfy = filtered
 	}
 	if cfg.Strict.Phases == nil {
 		cfg.Strict.Phases = base.Strict.Phases
@@ -505,6 +532,12 @@ func (c *Config) Validate() error {
 		sectionRef, err = regexp.Compile(c.Catalog.SectionRefPattern)
 		if err != nil {
 			return fmt.Errorf("catalog.sectionRefPattern: %w", err)
+		}
+	}
+
+	for i, r := range c.Policy.WaiverReasonsSatisfy {
+		if !stringIn(c.Waivers.Reasons, r) {
+			return fmt.Errorf("policy.waiverReasonsSatisfy[%d]: %q is not an allowed waiver reason (waivers.reasons)", i, r)
 		}
 	}
 

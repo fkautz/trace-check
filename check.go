@@ -151,8 +151,8 @@ func Check(cfg *Config, scope Scope, w io.Writer) error {
 		}
 	}
 
-	problems = append(problems, cfg.checkClassification(scope, reqs, known, tags)...)
-	problems = append(problems, cfg.checkPolicyRules(scope, reqs, tags)...)
+	problems = append(problems, cfg.checkClassification(scope, reqs, known, tags, waived)...)
+	problems = append(problems, cfg.checkPolicyRules(scope, reqs, tags, waived)...)
 
 	// Regenerate the matrix only from a consistent state.
 	if len(problems) == 0 {
@@ -223,8 +223,11 @@ func detectCoveredByCycles(edges map[string]string) []string {
 
 // checkPolicyRules enforces PolicyConfig.Rules against requirement metadata
 // and coverage classes. Forbids always apply; StrictRequires only under -strict
-// for requirements in the strict coverage set (phase/keyword filters).
-func (c *Config) checkPolicyRules(scope Scope, reqs []Requirement, tags map[string][]TagRef) []string {
+// for requirements in the strict coverage set (phase/keyword filters). A waiver
+// whose reason is in Policy.WaiverReasonsSatisfy (a deliberate excusal such as
+// documented-deviation, not a placeholder such as not-implemented) satisfies a
+// StrictRequires rule.
+func (c *Config) checkPolicyRules(scope Scope, reqs []Requirement, tags map[string][]TagRef, waived map[string]WaiverEntry) []string {
 	if len(c.Policy.Rules) == 0 {
 		return nil
 	}
@@ -243,6 +246,9 @@ func (c *Config) checkPolicyRules(scope Scope, reqs []Requirement, tags map[stri
 			if !c.needsStrictCoverage(r, scope) {
 				continue
 			}
+			if c.waiverSatisfiesPolicy(waived, tags, r.ID, rule.StrictRequiresCoverageClass) {
+				continue
+			}
 			if !hasCoverageClass(tags[r.ID], rule.StrictRequiresCoverageClass) {
 				problems = append(problems, fmt.Sprintf("%s (%s): policy requires %s coverage", r.ID, r.Section, rule.StrictRequiresCoverageClass))
 			}
@@ -251,12 +257,30 @@ func (c *Config) checkPolicyRules(scope Scope, reqs []Requirement, tags map[stri
 	return problems
 }
 
+// waiverSatisfiesPolicy reports whether id carries a waiver whose reason is a
+// deliberate excusal (Policy.WaiverReasonsSatisfy) that counts against a
+// StrictRequiresCoverageClass obligation for requiredClass. A covered-by
+// waiver is only evidence by proxy: it satisfies the obligation only when its
+// structured Covers target itself carries a tag of the required coverage
+// class — otherwise a bare covered-by would pass a freeze rule with no actual
+// coverage behind it.
+func (c *Config) waiverSatisfiesPolicy(waived map[string]WaiverEntry, tags map[string][]TagRef, id, requiredClass string) bool {
+	wv, ok := waived[id]
+	if !ok || !stringIn(c.Policy.WaiverReasonsSatisfy, wv.Reason) {
+		return false
+	}
+	if wv.Reason == c.Waivers.CoveredByReason {
+		return wv.Covers != "" && hasCoverageClass(tags[wv.Covers], requiredClass)
+	}
+	return true
+}
+
 // checkClassification enforces the classification policy: every requirement
 // classified exactly once; the required Reason for values that demand it; a
 // forbidden coverage class on a value is a stale classification; and, under
 // strict, a value that requires a coverage class must carry one. Dormant when
 // the classification file is absent (nil entries).
-func (c *Config) checkClassification(scope Scope, reqs []Requirement, known map[string]Requirement, tags map[string][]TagRef) []string {
+func (c *Config) checkClassification(scope Scope, reqs []Requirement, known map[string]Requirement, tags map[string][]TagRef, waived map[string]WaiverEntry) []string {
 	entries, classProblems, err := ParseClassification(c, scope.Classification)
 	if err != nil {
 		return []string{fmt.Sprintf("classification: %v", err)}
@@ -306,8 +330,10 @@ func (c *Config) checkClassification(scope Scope, reqs []Requirement, known map[
 		}
 		// Classification strict class requirement: apply when the requirement
 		// is in the strict coverage set (phase/keyword filters), not only
-		// when Strict is on for the whole catalog.
+		// when Strict is on for the whole catalog. A deliberate-excusal waiver
+		// (Policy.WaiverReasonsSatisfy) satisfies it, same as policy rules.
 		if scope.Strict && v.StrictRequiresCoverageClass != "" && c.needsStrictCoverage(r, scope) &&
+			!c.waiverSatisfiesPolicy(waived, tags, r.ID, v.StrictRequiresCoverageClass) &&
 			!hasCoverageClass(tags[r.ID], v.StrictRequiresCoverageClass) {
 			problems = append(problems, fmt.Sprintf("%s (%s): %s but has no %s coverage", r.ID, r.Section, class, v.StrictRequiresCoverageClass))
 		}
