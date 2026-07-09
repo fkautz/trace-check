@@ -19,7 +19,18 @@ type Scope struct {
 	Classification string // path to the classification markdown ("" or absent → dormant)
 	Waivers        string // path to the waivers markdown ("" or absent → none)
 	Out            string // matrix output path relative to Root; "" disables
+	OutJSON        string // optional machine-readable matrix path relative to Root; "" disables
 	Strict         bool   // enforce full coverage + per-class scenario policy
+	// StrictPhases, when non-empty under Strict, limits coverage enforcement to
+	// requirements whose Phase meta field is in this list. Overrides
+	// Config.Strict.Phases when set (e.g. from -strict-phase or a profile).
+	StrictPhases []string
+	// StrictKeywordClasses limits coverage enforcement to these policy classes
+	// (e.g. "must"). Overrides Config.Strict.KeywordClasses when set.
+	StrictKeywordClasses []string
+	// ArchitecturePath overrides Config.Architecture.Path when non-empty
+	// (absolute, or resolved by the caller relative to Root).
+	ArchitecturePath string
 }
 
 // Check reconciles the catalog, tags, waivers, and classification for one
@@ -42,6 +53,22 @@ func Check(cfg *Config, scope Scope, w io.Writer) error {
 		return err
 	}
 	problems := append(append(catalogProblems, tagProblems...), waiverProblems...)
+
+	// Architecture registry (optional).
+	archPath := scope.ArchitecturePath
+	if archPath == "" && cfg.Architecture.Path != "" {
+		if filepath.IsAbs(cfg.Architecture.Path) {
+			archPath = cfg.Architecture.Path
+		} else {
+			archPath = filepath.Join(scope.Root, cfg.Architecture.Path)
+		}
+	}
+	arch, archProblems, err := LoadArchitecture(cfg, archPath)
+	if err != nil {
+		return err
+	}
+	problems = append(problems, archProblems...)
+	problems = append(problems, cfg.validateCatalogMeta(reqs, arch)...)
 
 	known := make(map[string]Requirement, len(reqs))
 	catalogSeries := make(map[string]bool)
@@ -73,6 +100,7 @@ func Check(cfg *Config, scope Scope, w io.Writer) error {
 		validReason[r] = true
 	}
 	waived := make(map[string]WaiverEntry, len(waivers))
+	coversEdges := map[string]string{} // waiver ID -> covers target
 	for _, wv := range waivers {
 		if _, dup := waived[wv.ID]; dup {
 			problems = append(problems, fmt.Sprintf("%s: duplicate waiver", wv.ID))
@@ -91,23 +119,52 @@ func Check(cfg *Config, scope Scope, w io.Writer) error {
 		if len(tags[wv.ID]) > 0 {
 			problems = append(problems, fmt.Sprintf("%s: has both a waiver and tagged tests (%s)", wv.ID, tags[wv.ID][0].Func))
 		}
+
+		// Structured covered-by.
+		isCoveredBy := wv.Reason == cfg.Waivers.CoveredByReason
+		if isCoveredBy && cfg.Waivers.RequireCoversForCoveredBy && wv.Covers == "" {
+			problems = append(problems, fmt.Sprintf("%s: covered-by waiver has no %s line", wv.ID, cfg.Waivers.CoversField))
+		}
+		if wv.Covers != "" {
+			if !cfg.compiled.fullID.MatchString(wv.Covers) {
+				problems = append(problems, fmt.Sprintf("%s: %s target %q is not a well-formed requirement ID", wv.ID, cfg.Waivers.CoversField, wv.Covers))
+			} else if _, ok := known[wv.Covers]; !ok {
+				problems = append(problems, fmt.Sprintf("%s: %s target %s is not in the catalog", wv.ID, cfg.Waivers.CoversField, wv.Covers))
+			} else if wv.Covers == wv.ID {
+				problems = append(problems, fmt.Sprintf("%s: %s target must not be itself", wv.ID, cfg.Waivers.CoversField))
+			} else {
+				coversEdges[wv.ID] = wv.Covers
+			}
+			if !isCoveredBy {
+				problems = append(problems, fmt.Sprintf("%s: has %s line but reason is %q (want %s)", wv.ID, cfg.Waivers.CoversField, wv.Reason, cfg.Waivers.CoveredByReason))
+			}
+		}
 	}
+	problems = append(problems, detectCoveredByCycles(coversEdges)...)
 
 	covered := 0
 	for _, r := range reqs {
 		if len(tags[r.ID]) > 0 || waived[r.ID].ID != "" {
 			covered++
-		} else if scope.Strict {
+		} else if cfg.needsStrictCoverage(r, scope) {
 			problems = append(problems, fmt.Sprintf("%s (%s, %s): no tagged test or waiver", r.ID, displayKeyword(r), r.Section))
 		}
 	}
 
 	problems = append(problems, cfg.checkClassification(scope, reqs, known, tags)...)
+	problems = append(problems, cfg.checkPolicyRules(scope, reqs, tags)...)
 
 	// Regenerate the matrix only from a consistent state.
-	if scope.Out != "" && len(problems) == 0 {
-		if err := cfg.writeMatrix(filepath.Join(scope.Root, scope.Out), reqs, tags, waived); err != nil {
-			return err
+	if len(problems) == 0 {
+		if scope.Out != "" {
+			if err := cfg.writeMatrix(filepath.Join(scope.Root, scope.Out), reqs, tags, waived); err != nil {
+				return err
+			}
+		}
+		if scope.OutJSON != "" {
+			if err := cfg.writeMatrixJSON(filepath.Join(scope.Root, scope.OutJSON), reqs, tags, waived); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -121,6 +178,77 @@ func Check(cfg *Config, scope Scope, w io.Writer) error {
 		return fmt.Errorf("%d problem(s)", len(problems))
 	}
 	return nil
+}
+
+// detectCoveredByCycles reports cycles in the structured covered-by graph.
+func detectCoveredByCycles(edges map[string]string) []string {
+	if len(edges) == 0 {
+		return nil
+	}
+	const (
+		white = 0
+		gray  = 1
+		black = 2
+	)
+	color := map[string]int{}
+	var problems []string
+	var visit func(id string, path []string)
+	visit = func(id string, path []string) {
+		color[id] = gray
+		path = append(path, id)
+		if next, ok := edges[id]; ok {
+			switch color[next] {
+			case white:
+				visit(next, path)
+			case gray:
+				// cycle
+				cycle := append(path, next)
+				problems = append(problems, fmt.Sprintf("%s: covered-by cycle %s", id, strings.Join(cycle, " -> ")))
+			}
+		}
+		color[id] = black
+	}
+	ids := make([]string, 0, len(edges))
+	for id := range edges {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if color[id] == white {
+			visit(id, nil)
+		}
+	}
+	return problems
+}
+
+// checkPolicyRules enforces PolicyConfig.Rules against requirement metadata
+// and coverage classes. Forbids always apply; StrictRequires only under -strict
+// for requirements in the strict coverage set (phase/keyword filters).
+func (c *Config) checkPolicyRules(scope Scope, reqs []Requirement, tags map[string][]TagRef) []string {
+	if len(c.Policy.Rules) == 0 {
+		return nil
+	}
+	var problems []string
+	for _, r := range reqs {
+		for _, rule := range c.Policy.Rules {
+			if !policyMatches(rule, r) {
+				continue
+			}
+			if rule.ForbidsCoverageClass != "" && hasCoverageClass(tags[r.ID], rule.ForbidsCoverageClass) {
+				problems = append(problems, fmt.Sprintf("%s: policy forbids %s coverage", r.ID, rule.ForbidsCoverageClass))
+			}
+			if !scope.Strict || rule.StrictRequiresCoverageClass == "" || rule.AllowUncovered {
+				continue
+			}
+			if !c.needsStrictCoverage(r, scope) {
+				continue
+			}
+			if !hasCoverageClass(tags[r.ID], rule.StrictRequiresCoverageClass) {
+				problems = append(problems, fmt.Sprintf("%s (%s): policy requires %s coverage", r.ID, r.Section, rule.StrictRequiresCoverageClass))
+			}
+		}
+	}
+	return problems
 }
 
 // checkClassification enforces the classification policy: every requirement
@@ -176,7 +304,11 @@ func (c *Config) checkClassification(scope Scope, reqs []Requirement, known map[
 		if v.ForbidsCoverageClass != "" && hasCoverageClass(tags[r.ID], v.ForbidsCoverageClass) {
 			problems = append(problems, fmt.Sprintf("%s: classified %s but has a %s tag (stale classification)", r.ID, class, v.ForbidsCoverageClass))
 		}
-		if scope.Strict && v.StrictRequiresCoverageClass != "" && !hasCoverageClass(tags[r.ID], v.StrictRequiresCoverageClass) {
+		// Classification strict class requirement: apply when the requirement
+		// is in the strict coverage set (phase/keyword filters), not only
+		// when Strict is on for the whole catalog.
+		if scope.Strict && v.StrictRequiresCoverageClass != "" && c.needsStrictCoverage(r, scope) &&
+			!hasCoverageClass(tags[r.ID], v.StrictRequiresCoverageClass) {
 			problems = append(problems, fmt.Sprintf("%s (%s): %s but has no %s coverage", r.ID, r.Section, class, v.StrictRequiresCoverageClass))
 		}
 	}

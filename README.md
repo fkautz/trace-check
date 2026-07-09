@@ -25,14 +25,16 @@ import tracecheck "github.com/fkautz/trace-check"
 
 ## The model
 
-trace-check reconciles four artifacts:
+trace-check reconciles four core artifacts (plus optional architecture/policy):
 
 | Artifact | What it is |
 |---|---|
-| **Catalog** | every requirement as a stable ID, in markdown |
+| **Catalog** | every requirement as a stable ID, in markdown (optional meta fields) |
 | **Tags** | tests declaring `<keyword> <ID>` in a comment (e.g. `// Verifies: REQ-001`) |
 | **Waivers** | requirements excused from testing, each with an allowed reason |
 | **Classification** | optional per-requirement axis (e.g. whether a requirement is observable by a black-box test) |
+| **Architecture** | optional closed vocabulary of Components / Invariants for catalog field enums |
+| **Policy rules** | optional when→coverage constraints driven by catalog meta |
 
 It always enforces **integrity**:
 
@@ -41,14 +43,73 @@ It always enforces **integrity**:
 - waiver reasons come from the configured allowed set;
 - each requirement is classified at most once;
 - a single test tags at most one requirement, so a failing test attributes to
-  exactly one requirement by name.
+  exactly one requirement by name;
+- required catalog meta fields are present and match enums / architecture names;
+- structured `Covers:` targets (when used) exist, are well-formed, and form no cycles.
 
-With `-strict` it additionally enforces **full coverage**: every requirement is
-tagged or waived, and every classification value that demands a coverage class
-has one (e.g. a wire-observable requirement must have a black-box test).
+With `-strict` it additionally enforces **full coverage** for requirements in
+scope: each must be tagged or waived, and classification / policy rules that
+demand a coverage class must be satisfied. Scope can be the whole catalog
+(legacy) or filtered by **Phase** and/or keyword class (`must` / `should` / …)
+via config `strict.*`, flags `-strict-phase` / `-strict-class`, or a named
+`-profile`.
 
-On a clean run it regenerates the matrix at `-out`. On any problem it writes
-nothing and exits non-zero.
+On a clean run it regenerates the matrix at `-out` (and optional `-out-json`).
+On any problem it writes nothing and exits non-zero.
+
+### Architecture adherence
+
+Declare extra catalog fields and optionally bind them to an architecture
+registry:
+
+```json
+{
+  "catalog": {
+    "fields": [
+      {"name": "Component", "required": true, "enumFrom": "architecture.components"},
+      {"name": "Phase", "required": true, "enum": ["1", "2", "later"]},
+      {"name": "Kind", "required": true, "enum": ["invariant", "encoding", "ops"]}
+    ]
+  },
+  "architecture": {"path": "docs/architecture.md"},
+  "strict": {"phases": ["1"], "keywordClasses": ["must"]},
+  "policy": {
+    "rules": [
+      {"when": {"Kind": ["encoding"]}, "strictRequiresCoverageClass": "conformance"},
+      {"when": {"Kind": ["ops"]}, "allowUncovered": true}
+    ]
+  },
+  "profiles": {
+    "phase1-freeze": {
+      "strict": true,
+      "strictPhases": ["1"],
+      "strictKeywordClasses": ["must"]
+    }
+  }
+}
+```
+
+Architecture file shape:
+
+```markdown
+### Components
+- fault-in
+- cas
+
+### Invariants
+- I-VERIFY — no exposure before verify
+```
+
+Structured covered-by (optional but recommended):
+
+```markdown
+### REQ-API-008
+- Reason: covered-by
+- Covers: REQ-API-001
+- Rationale: special case of 001.
+```
+
+Set `waivers.requireCoversForCoveredBy` to require the `Covers` line.
 
 ### Multiple scopes
 

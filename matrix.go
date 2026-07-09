@@ -1,17 +1,16 @@
 package tracecheck
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 // writeMatrix generates the traceability matrix markdown file. Layout and
-// labels are config-driven (Config.Matrix); the two coverage columns are the
-// primary class and the secondary class — a tag whose class equals
-// Matrix.SecondaryClass lands in the secondary column, every other class in
-// the primary column.
+// labels are config-driven (Config.Matrix).
 func (c *Config) writeMatrix(path string, reqs []Requirement, tags map[string][]TagRef, waived map[string]WaiverEntry) error {
 	var b strings.Builder
 	b.WriteString("# Traceability Matrix\n\n")
@@ -33,8 +32,21 @@ func (c *Config) writeMatrix(path string, reqs []Requirement, tags map[string][]
 		fmt.Fprintf(&b, "- %s: %d/%d\n", class, t[0], t[1])
 	}
 
-	// Gap lists by coverage: proven by the primary class only, the secondary
-	// class only, both, or not proven (waived / uncovered).
+	if len(c.Matrix.CoverageColumns) > 0 {
+		c.writeMultiColumnGaps(&b, reqs, tags, waived)
+		c.writeMultiColumnTable(&b, reqs, tags, waived)
+	} else {
+		c.writeTwoColumnGaps(&b, reqs, tags, waived)
+		c.writeTwoColumnTable(&b, reqs, tags, waived)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o600)
+}
+
+func (c *Config) writeTwoColumnGaps(b *strings.Builder, reqs []Requirement, tags map[string][]TagRef, waived map[string]WaiverEntry) {
 	var secondaryOnly, primaryOnly, both, waivedIDs, uncovered []string
 	for _, r := range reqs {
 		hasPrimary, hasSecondary := false, false
@@ -59,42 +71,154 @@ func (c *Config) writeMatrix(path string, reqs []Requirement, tags map[string][]
 		}
 	}
 	b.WriteString("\nCoverage by test class:\n\n")
-	gapLine(&b, c.Matrix.BothLabel, both)
-	gapLine(&b, c.Matrix.PrimaryOnlyLabel, primaryOnly)
-	gapLine(&b, c.Matrix.SecondaryOnlyLabel, secondaryOnly)
-	gapLine(&b, "waived", waivedIDs)
-	gapLine(&b, "uncovered", uncovered)
+	gapLine(b, c.Matrix.BothLabel, both)
+	gapLine(b, c.Matrix.PrimaryOnlyLabel, primaryOnly)
+	gapLine(b, c.Matrix.SecondaryOnlyLabel, secondaryOnly)
+	gapLine(b, "waived", waivedIDs)
+	gapLine(b, "uncovered", uncovered)
+}
 
-	fmt.Fprintf(&b, "\n| Requirement | Section | Keyword | %s | %s |\n|---|---|---|---|---|\n", c.Matrix.PrimaryLabel, c.Matrix.SecondaryLabel)
+func (c *Config) writeTwoColumnTable(b *strings.Builder, reqs []Requirement, tags map[string][]TagRef, waived map[string]WaiverEntry) {
+	groups := groupReqs(reqs, c.Matrix.GroupBy)
+	for _, g := range groups {
+		if g.Key != "" {
+			fmt.Fprintf(b, "\n## %s: %s\n", c.Matrix.GroupBy, g.Key)
+		}
+		fmt.Fprintf(b, "\n| Requirement | Section | Keyword | %s | %s |\n|---|---|---|---|---|\n", c.Matrix.PrimaryLabel, c.Matrix.SecondaryLabel)
+		for _, r := range g.Reqs {
+			primary, secondary := "—", "—"
+			var pParts, sParts []string
+			for _, ref := range tags[r.ID] {
+				cell := fmt.Sprintf("`%s` (%s)", ref.Func, ref.File)
+				if ref.Class == c.Matrix.SecondaryClass {
+					sParts = append(sParts, cell)
+				} else {
+					pParts = append(pParts, cell)
+				}
+			}
+			if len(pParts) > 0 {
+				primary = strings.Join(pParts, "; ")
+			}
+			if len(sParts) > 0 {
+				secondary = strings.Join(sParts, "; ")
+			}
+			if len(tags[r.ID]) == 0 {
+				if wv := waived[r.ID]; wv.ID != "" {
+					primary = waiverCell(wv)
+				}
+			}
+			fmt.Fprintf(b, "| %s | %s | %s | %s | %s |\n", r.ID, r.Section, displayKeyword(r), primary, secondary)
+		}
+	}
+}
+
+func (c *Config) writeMultiColumnGaps(b *strings.Builder, reqs []Requirement, tags map[string][]TagRef, waived map[string]WaiverEntry) {
+	b.WriteString("\nCoverage by test class:\n\n")
+	for _, col := range c.Matrix.CoverageColumns {
+		var ids []string
+		for _, r := range reqs {
+			if hasCoverageClass(tags[r.ID], col.Class) {
+				ids = append(ids, r.ID)
+			}
+		}
+		gapLine(b, col.Label, ids)
+	}
+	var waivedIDs, uncovered []string
 	for _, r := range reqs {
-		primary, secondary := "—", "—"
-		var pParts, sParts []string
-		for _, ref := range tags[r.ID] {
-			cell := fmt.Sprintf("`%s` (%s)", ref.Func, ref.File)
-			if ref.Class == c.Matrix.SecondaryClass {
-				sParts = append(sParts, cell)
-			} else {
-				pParts = append(pParts, cell)
-			}
+		if len(tags[r.ID]) > 0 {
+			continue
 		}
-		if len(pParts) > 0 {
-			primary = strings.Join(pParts, "; ")
+		if waived[r.ID].ID != "" {
+			waivedIDs = append(waivedIDs, r.ID)
+		} else {
+			uncovered = append(uncovered, r.ID)
 		}
-		if len(sParts) > 0 {
-			secondary = strings.Join(sParts, "; ")
-		}
-		if len(tags[r.ID]) == 0 {
-			if wv := waived[r.ID]; wv.ID != "" {
-				primary = "waiver: " + wv.Reason
-			}
-		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", r.ID, r.Section, displayKeyword(r), primary, secondary)
 	}
+	gapLine(b, "waived", waivedIDs)
+	gapLine(b, "uncovered", uncovered)
+}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return err
+func (c *Config) writeMultiColumnTable(b *strings.Builder, reqs []Requirement, tags map[string][]TagRef, waived map[string]WaiverEntry) {
+	groups := groupReqs(reqs, c.Matrix.GroupBy)
+	// Header
+	var header, sep strings.Builder
+	header.WriteString("| Requirement | Section | Keyword")
+	sep.WriteString("|---|---|---")
+	for _, col := range c.Matrix.CoverageColumns {
+		fmt.Fprintf(&header, " | %s", col.Label)
+		sep.WriteString("|---")
 	}
-	return os.WriteFile(path, []byte(b.String()), 0o600)
+	header.WriteString(" |\n")
+	sep.WriteString("|\n")
+
+	for _, g := range groups {
+		if g.Key != "" {
+			fmt.Fprintf(b, "\n## %s: %s\n", c.Matrix.GroupBy, g.Key)
+		}
+		b.WriteByte('\n')
+		b.WriteString(header.String())
+		b.WriteString(sep.String())
+		for _, r := range g.Reqs {
+			fmt.Fprintf(b, "| %s | %s | %s", r.ID, r.Section, displayKeyword(r))
+			anyTag := len(tags[r.ID]) > 0
+			for _, col := range c.Matrix.CoverageColumns {
+				cell := "—"
+				var parts []string
+				for _, ref := range tags[r.ID] {
+					if ref.Class == col.Class {
+						parts = append(parts, fmt.Sprintf("`%s` (%s)", ref.Func, ref.File))
+					}
+				}
+				if len(parts) > 0 {
+					cell = strings.Join(parts, "; ")
+				} else if !anyTag && col == c.Matrix.CoverageColumns[0] {
+					if wv := waived[r.ID]; wv.ID != "" {
+						cell = waiverCell(wv)
+					}
+				}
+				fmt.Fprintf(b, " | %s", cell)
+			}
+			b.WriteString(" |\n")
+		}
+	}
+}
+
+func waiverCell(wv WaiverEntry) string {
+	if wv.Covers != "" {
+		return fmt.Sprintf("waiver: %s → %s", wv.Reason, wv.Covers)
+	}
+	return "waiver: " + wv.Reason
+}
+
+type reqGroup struct {
+	Key  string
+	Reqs []Requirement
+}
+
+// groupReqs partitions requirements by Meta[groupBy]. Empty groupBy yields one
+// group with empty Key (no section header).
+func groupReqs(reqs []Requirement, groupBy string) []reqGroup {
+	if groupBy == "" {
+		return []reqGroup{{Key: "", Reqs: reqs}}
+	}
+	order := []string{}
+	byKey := map[string][]Requirement{}
+	for _, r := range reqs {
+		k := r.MetaValue(groupBy)
+		if k == "" {
+			k = "(unset)"
+		}
+		if _, ok := byKey[k]; !ok {
+			order = append(order, k)
+		}
+		byKey[k] = append(byKey[k], r)
+	}
+	sort.Strings(order)
+	out := make([]reqGroup, 0, len(order))
+	for _, k := range order {
+		out = append(out, reqGroup{Key: k, Reqs: byKey[k]})
+	}
+	return out
 }
 
 // gapLine writes one gap-list bullet: a count and the member IDs (or "(none)").
@@ -104,4 +228,93 @@ func gapLine(b *strings.Builder, label string, ids []string) {
 		return
 	}
 	fmt.Fprintf(b, "- %s: %d — %s\n", label, len(ids), strings.Join(ids, ", "))
+}
+
+// MatrixJSON is the machine-readable matrix emitted by -out-json.
+type MatrixJSON struct {
+	GeneratedBy  string              `json:"generatedBy"`
+	Summary      MatrixJSONSummary   `json:"summary"`
+	Requirements []MatrixJSONReq     `json:"requirements"`
+}
+
+// MatrixJSONSummary counts coverage by policy class.
+type MatrixJSONSummary struct {
+	Total     int            `json:"total"`
+	Tagged    int            `json:"tagged"`
+	Waived    int            `json:"waived"`
+	Uncovered int            `json:"uncovered"`
+	ByClass   map[string]int `json:"byClass"` // class -> covered count
+}
+
+// MatrixJSONReq is one requirement's coverage row.
+type MatrixJSONReq struct {
+	ID       string              `json:"id"`
+	Section  string              `json:"section"`
+	Keyword  string              `json:"keyword"`
+	Class    string              `json:"class"`
+	Meta     map[string]string   `json:"meta,omitempty"`
+	Tags     []MatrixJSONTag     `json:"tags,omitempty"`
+	Waiver   *MatrixJSONWaiver   `json:"waiver,omitempty"`
+	Covered  bool                `json:"covered"`
+}
+
+// MatrixJSONTag is one test tag.
+type MatrixJSONTag struct {
+	File  string `json:"file"`
+	Func  string `json:"func"`
+	Class string `json:"class"`
+}
+
+// MatrixJSONWaiver is a waiver summary.
+type MatrixJSONWaiver struct {
+	Reason string `json:"reason"`
+	Covers string `json:"covers,omitempty"`
+}
+
+func (c *Config) writeMatrixJSON(path string, reqs []Requirement, tags map[string][]TagRef, waived map[string]WaiverEntry) error {
+	out := MatrixJSON{
+		GeneratedBy: strings.Trim(c.Matrix.GeneratedBy, "`"),
+		Summary: MatrixJSONSummary{
+			ByClass: map[string]int{},
+		},
+	}
+	for _, r := range reqs {
+		row := MatrixJSONReq{
+			ID:      r.ID,
+			Section: r.Section,
+			Keyword: displayKeyword(r),
+			Class:   r.Class,
+		}
+		if len(r.Meta) > 0 {
+			row.Meta = r.Meta
+		}
+		for _, ref := range tags[r.ID] {
+			row.Tags = append(row.Tags, MatrixJSONTag{File: ref.File, Func: ref.Func, Class: ref.Class})
+		}
+		if wv, ok := waived[r.ID]; ok {
+			row.Waiver = &MatrixJSONWaiver{Reason: wv.Reason, Covers: wv.Covers}
+		}
+		row.Covered = len(row.Tags) > 0 || row.Waiver != nil
+		out.Requirements = append(out.Requirements, row)
+
+		out.Summary.Total++
+		if len(row.Tags) > 0 {
+			out.Summary.Tagged++
+			out.Summary.ByClass[r.Class]++
+		} else if row.Waiver != nil {
+			out.Summary.Waived++
+			out.Summary.ByClass[r.Class]++
+		} else {
+			out.Summary.Uncovered++
+		}
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
 }

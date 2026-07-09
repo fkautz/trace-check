@@ -20,15 +20,19 @@ import (
 // so a config file names only the fields it changes. Always Validate() before
 // use — it compiles the regexes and rejects contradictory settings.
 type Config struct {
-	IDGrammar      IDGrammar      `json:"idGrammar"`
-	Catalog        CatalogConfig  `json:"catalog"`
-	KeywordClasses []KeywordClass `json:"keywordClasses"`
-	Tag            TagConfig      `json:"tag"`
-	Coverage       CoverageConfig `json:"coverage"`
-	Waivers        WaiverConfig   `json:"waivers"`
-	Classification ClassConfig    `json:"classification"`
-	Matrix         MatrixConfig   `json:"matrix"`
-	SkipDirs       []string       `json:"skipDirs"`
+	IDGrammar      IDGrammar           `json:"idGrammar"`
+	Catalog        CatalogConfig       `json:"catalog"`
+	KeywordClasses []KeywordClass      `json:"keywordClasses"`
+	Tag            TagConfig           `json:"tag"`
+	Coverage       CoverageConfig      `json:"coverage"`
+	Waivers        WaiverConfig        `json:"waivers"`
+	Classification ClassConfig         `json:"classification"`
+	Matrix         MatrixConfig        `json:"matrix"`
+	Architecture   ArchitectureConfig  `json:"architecture"`
+	Policy         PolicyConfig        `json:"policy"`
+	Strict         StrictConfig        `json:"strict"`
+	Profiles       map[string]Profile  `json:"profiles"`
+	SkipDirs       []string            `json:"skipDirs"`
 
 	compiled compiledConfig
 }
@@ -67,6 +71,23 @@ type CatalogConfig struct {
 	// Section line (e.g. §[\d.]*\d). Empty falls back to the text up to the
 	// first ";".
 	SectionRefPattern string `json:"sectionRefPattern"`
+	// Fields are optional metadata fields parsed as "- Name: value" under each
+	// requirement. Used for architecture adherence (Component, Phase, Kind, …).
+	// Names must not collide with keywordField or sectionField.
+	Fields []CatalogField `json:"fields"`
+}
+
+// CatalogField describes one optional catalog metadata field.
+type CatalogField struct {
+	Name     string   `json:"name"`
+	Required bool     `json:"required"`
+	// Enum is a closed set of allowed values. Empty means any non-empty value
+	// is accepted when the field is present (or required).
+	Enum []string `json:"enum"`
+	// EnumFrom loads allowed values from the architecture registry:
+	// "architecture.components" or "architecture.invariants". Requires
+	// architecture.path (or Scope architecture resolution) to be set.
+	EnumFrom string `json:"enumFrom"`
 }
 
 // KeywordClass maps catalog Keyword tokens to a policy class. Entries are
@@ -123,7 +144,16 @@ type CoverageRule struct {
 type WaiverConfig struct {
 	ReasonField    string   `json:"reasonField"`
 	RationaleField string   `json:"rationaleField"`
-	Reasons        []string `json:"reasons"`
+	// CoversField is the structured covered-by target line label (default
+	// "Covers"). Empty disables structured covers parsing.
+	CoversField string `json:"coversField"`
+	// CoveredByReason is the reason value that means "covered by another
+	// requirement" (default "covered-by").
+	CoveredByReason string `json:"coveredByReason"`
+	// RequireCoversForCoveredBy requires a Covers line when Reason is
+	// CoveredByReason. Off by default for backward compatibility.
+	RequireCoversForCoveredBy bool     `json:"requireCoversForCoveredBy"`
+	Reasons                   []string `json:"reasons"`
 }
 
 // ClassConfig defines the wire-observability (or analogous) classification.
@@ -149,9 +179,63 @@ type ClassValue struct {
 	StrictRequiresCoverageClass string `json:"strictRequiresCoverageClass"`
 }
 
-// MatrixConfig labels the two coverage columns of the generated matrix. A tag
-// whose class equals SecondaryClass lands in the secondary column; every other
-// class lands in the primary column.
+// ArchitectureConfig points at a closed vocabulary of components and
+// invariants. Empty Path disables architecture registry loading.
+type ArchitectureConfig struct {
+	// Path is relative to Scope.Root (or absolute). Empty = dormant.
+	Path string `json:"path"`
+	// ComponentSection is the ##/### heading title for components (default "Components").
+	ComponentSection string `json:"componentSection"`
+	// InvariantSection is the ##/### heading title for invariants (default "Invariants").
+	InvariantSection string `json:"invariantSection"`
+}
+
+// PolicyConfig holds when→coverage rules driven by catalog metadata.
+type PolicyConfig struct {
+	Rules []PolicyRule `json:"rules"`
+}
+
+// PolicyRule applies coverage constraints when a requirement's metadata matches.
+// When is AND across fields, OR within a field's value list. Special field
+// "KeywordClass" matches Requirement.Class; other keys match Meta fields.
+type PolicyRule struct {
+	When                        map[string][]string `json:"when"`
+	StrictRequiresCoverageClass string              `json:"strictRequiresCoverageClass"`
+	ForbidsCoverageClass        string              `json:"forbidsCoverageClass"`
+	// AllowUncovered: under -strict, matching requirements need no tag/waiver.
+	AllowUncovered bool `json:"allowUncovered"`
+}
+
+// StrictConfig scopes full-coverage enforcement under -strict.
+// Empty Phases and KeywordClasses mean "all requirements" (legacy behaviour).
+type StrictConfig struct {
+	// Phases: only requirements whose Phase meta field is in this list need
+	// coverage under -strict. Empty = no phase filter.
+	Phases []string `json:"phases"`
+	// KeywordClasses: only these policy classes need coverage under -strict
+	// (e.g. ["must"]). Empty = no keyword-class filter.
+	KeywordClasses []string `json:"keywordClasses"`
+	// PhaseField is the catalog metadata field holding the phase (default "Phase").
+	PhaseField string `json:"phaseField"`
+}
+
+// Profile is a named strictness/filter pack selected with -profile.
+type Profile struct {
+	// Strict forces -strict when the profile is selected.
+	Strict bool `json:"strict"`
+	// StrictPhases overrides config strict.phases for this profile when non-empty.
+	StrictPhases []string `json:"strictPhases"`
+	// StrictKeywordClasses overrides config strict.keywordClasses when non-empty.
+	StrictKeywordClasses []string `json:"strictKeywordClasses"`
+}
+
+// MatrixConfig labels the coverage columns of the generated matrix.
+//
+// Two-column mode (default): a tag whose class equals SecondaryClass lands in
+// the secondary column; every other class lands in the primary column.
+//
+// Multi-column mode: when CoverageColumns is non-empty, one column per entry
+// is emitted and the two-column gap lists are replaced by per-class counts.
 type MatrixConfig struct {
 	PrimaryClass       string `json:"primaryClass"`
 	PrimaryLabel       string `json:"primaryLabel"`
@@ -163,6 +247,17 @@ type MatrixConfig struct {
 	// GeneratedBy is the tool attribution in the matrix's "Generated by …"
 	// line (markdown, so backticks are conventional).
 	GeneratedBy string `json:"generatedBy"`
+	// CoverageColumns, when non-empty, replaces primary/secondary columns.
+	CoverageColumns []MatrixColumn `json:"coverageColumns"`
+	// GroupBy is a catalog meta field name; when set, the matrix is sectioned
+	// by that field's value (e.g. "Component", "Phase").
+	GroupBy string `json:"groupBy"`
+}
+
+// MatrixColumn is one coverage-class column in multi-column matrix mode.
+type MatrixColumn struct {
+	Class string `json:"class"`
+	Label string `json:"label"`
 }
 
 // compiledConfig holds the regexes built from Config during Validate.
@@ -176,9 +271,12 @@ type compiledConfig struct {
 	sectionRef        *regexp.Regexp // nil if SectionRefPattern is empty
 	series            *regexp.Regexp // nil if SeriesPattern is empty
 	reasonField       *regexp.Regexp // waiver reason line
+	coversField       *regexp.Regexp // nil if CoversField empty
 	rationalePrefix   string
 	classClassField   string
 	classReasonPrefix string
+	// metaFieldLines maps field name -> compiled "^- Name:\s*(.*)$"
+	metaFieldLines map[string]*regexp.Regexp
 }
 
 // Default returns the configuration that reproduces the original
@@ -219,9 +317,12 @@ func Default() Config {
 			},
 		},
 		Waivers: WaiverConfig{
-			ReasonField:    "Reason",
-			RationaleField: "Rationale",
-			Reasons:        []string{"deployment-guidance", "not-implemented", "covered-by", "documented-deviation", "foundational"},
+			ReasonField:               "Reason",
+			RationaleField:            "Rationale",
+			CoversField:               "Covers",
+			CoveredByReason:           "covered-by",
+			RequireCoversForCoveredBy: false,
+			Reasons:                   []string{"deployment-guidance", "not-implemented", "covered-by", "documented-deviation", "foundational"},
 		},
 		Classification: ClassConfig{
 			ClassField:  "Class",
@@ -240,6 +341,13 @@ func Default() Config {
 			PrimaryOnlyLabel:   "unit only",
 			SecondaryOnlyLabel: "black-box only",
 			GeneratedBy:        "`trace-check`",
+		},
+		Architecture: ArchitectureConfig{
+			ComponentSection: "Components",
+			InvariantSection: "Invariants",
+		},
+		Strict: StrictConfig{
+			PhaseField: "Phase",
 		},
 		SkipDirs: []string{".git", "testdata", "docs"},
 	}
@@ -270,6 +378,12 @@ func LoadConfig(path string) (Config, error) {
 	cfg.Coverage.Rules = nil
 	cfg.Classification.Values = nil
 	cfg.Waivers.Reasons = nil
+	cfg.Catalog.Fields = nil
+	cfg.Matrix.CoverageColumns = nil
+	cfg.Policy.Rules = nil
+	cfg.Strict.Phases = nil
+	cfg.Strict.KeywordClasses = nil
+	cfg.Profiles = nil
 	cfg.SkipDirs = nil
 
 	dec := json.NewDecoder(strings.NewReader(string(data)))
@@ -301,8 +415,34 @@ func LoadConfig(path string) (Config, error) {
 	if cfg.Waivers.Reasons == nil {
 		cfg.Waivers.Reasons = base.Waivers.Reasons
 	}
+	if cfg.Catalog.Fields == nil {
+		cfg.Catalog.Fields = base.Catalog.Fields
+	}
+	if cfg.Matrix.CoverageColumns == nil {
+		cfg.Matrix.CoverageColumns = base.Matrix.CoverageColumns
+	}
+	if cfg.Policy.Rules == nil {
+		cfg.Policy.Rules = base.Policy.Rules
+	}
+	if cfg.Strict.Phases == nil {
+		cfg.Strict.Phases = base.Strict.Phases
+	}
+	if cfg.Strict.KeywordClasses == nil {
+		cfg.Strict.KeywordClasses = base.Strict.KeywordClasses
+	}
+	if cfg.Profiles == nil {
+		cfg.Profiles = base.Profiles
+	}
 	if cfg.SkipDirs == nil {
 		cfg.SkipDirs = base.SkipDirs
+	}
+	// Scalar defaults that JSON may zero out only if the parent object was
+	// fully replaced are preserved via merge of nested structs already.
+
+	// Fill empty waiver covers defaults when the user overrode Waivers but
+	// omitted the new fields (zero values).
+	if cfg.Waivers.CoveredByReason == "" {
+		cfg.Waivers.CoveredByReason = base.Waivers.CoveredByReason
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -363,6 +503,31 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	metaFieldLines := map[string]*regexp.Regexp{}
+	seenField := map[string]bool{}
+	for i, f := range c.Catalog.Fields {
+		name := strings.TrimSpace(f.Name)
+		if name == "" {
+			return fmt.Errorf("catalog.fields[%d].name is required", i)
+		}
+		if name == c.Catalog.KeywordField || name == c.Catalog.SectionField {
+			return fmt.Errorf("catalog.fields[%d].name %q collides with keywordField/sectionField", i, name)
+		}
+		if seenField[name] {
+			return fmt.Errorf("catalog.fields: duplicate field %q", name)
+		}
+		seenField[name] = true
+		switch f.EnumFrom {
+		case "", "architecture.components", "architecture.invariants":
+		default:
+			return fmt.Errorf("catalog.fields[%d].enumFrom: unknown %q (want architecture.components or architecture.invariants)", i, f.EnumFrom)
+		}
+		if f.EnumFrom != "" && len(f.Enum) > 0 {
+			return fmt.Errorf("catalog.fields[%d]: enum and enumFrom are mutually exclusive", i)
+		}
+		metaFieldLines[name] = regexp.MustCompile(`^- ` + regexp.QuoteMeta(name) + `:\s*(.*)$`)
+	}
+
 	if strings.TrimSpace(c.Tag.Keyword) == "" {
 		return fmt.Errorf("tag.keyword is required")
 	}
@@ -407,12 +572,43 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("waivers.rationaleField is required")
 	}
 	reasonField := regexp.MustCompile(`^- ` + regexp.QuoteMeta(c.Waivers.ReasonField) + `:\s*(.*)$`)
+	var coversField *regexp.Regexp
+	if c.Waivers.CoversField != "" {
+		coversField = regexp.MustCompile(`^- ` + regexp.QuoteMeta(c.Waivers.CoversField) + `:\s*(.*)$`)
+	}
+	if c.Waivers.CoveredByReason == "" {
+		c.Waivers.CoveredByReason = "covered-by"
+	}
+	if c.Strict.PhaseField == "" {
+		c.Strict.PhaseField = "Phase"
+	}
 
 	if strings.TrimSpace(c.Classification.ClassField) == "" {
 		return fmt.Errorf("classification.classField is required")
 	}
 	if strings.TrimSpace(c.Classification.ReasonField) == "" {
 		return fmt.Errorf("classification.reasonField is required")
+	}
+
+	for i, col := range c.Matrix.CoverageColumns {
+		if strings.TrimSpace(col.Class) == "" {
+			return fmt.Errorf("matrix.coverageColumns[%d].class is required", i)
+		}
+		if strings.TrimSpace(col.Label) == "" {
+			return fmt.Errorf("matrix.coverageColumns[%d].label is required", i)
+		}
+	}
+
+	usesArchEnum := false
+	for _, f := range c.Catalog.Fields {
+		if f.EnumFrom != "" {
+			usesArchEnum = true
+			break
+		}
+	}
+	if usesArchEnum && strings.TrimSpace(c.Architecture.Path) == "" {
+		// Architecture path may still be supplied at Check time via Scope;
+		// only warn at Validate if we can. Allow empty here; Check enforces.
 	}
 
 	c.compiled = compiledConfig{
@@ -425,9 +621,11 @@ func (c *Config) Validate() error {
 		sectionRef:        sectionRef,
 		series:            series,
 		reasonField:       reasonField,
+		coversField:       coversField,
 		rationalePrefix:   "- " + c.Waivers.RationaleField + ":",
 		classClassField:   "- " + c.Classification.ClassField + ":",
 		classReasonPrefix: "- " + c.Classification.ReasonField + ":",
+		metaFieldLines:    metaFieldLines,
 	}
 	return nil
 }
@@ -485,4 +683,77 @@ func (c *Config) orderedClasses() []string {
 		add(st.Class)
 	}
 	return classes
+}
+
+// phaseFieldName returns the catalog meta field used for phase filtering.
+func (c *Config) phaseFieldName() string {
+	if c.Strict.PhaseField != "" {
+		return c.Strict.PhaseField
+	}
+	return "Phase"
+}
+
+// ApplyProfile merges a named profile into scope filters. Unknown name errors.
+func (c *Config) ApplyProfile(name string, scope *Scope) error {
+	if name == "" {
+		return nil
+	}
+	if c.Profiles == nil {
+		return fmt.Errorf("unknown profile %q (no profiles configured)", name)
+	}
+	p, ok := c.Profiles[name]
+	if !ok {
+		return fmt.Errorf("unknown profile %q", name)
+	}
+	if p.Strict {
+		scope.Strict = true
+	}
+	if len(p.StrictPhases) > 0 {
+		scope.StrictPhases = append([]string(nil), p.StrictPhases...)
+	}
+	if len(p.StrictKeywordClasses) > 0 {
+		scope.StrictKeywordClasses = append([]string(nil), p.StrictKeywordClasses...)
+	}
+	return nil
+}
+
+// effectiveStrictPhases returns CLI/profile phases, else config strict.phases.
+func (c *Config) effectiveStrictPhases(scope Scope) []string {
+	if len(scope.StrictPhases) > 0 {
+		return scope.StrictPhases
+	}
+	return c.Strict.Phases
+}
+
+// effectiveStrictKeywordClasses returns CLI/profile classes, else config.
+func (c *Config) effectiveStrictKeywordClasses(scope Scope) []string {
+	if len(scope.StrictKeywordClasses) > 0 {
+		return scope.StrictKeywordClasses
+	}
+	return c.Strict.KeywordClasses
+}
+
+// needsStrictCoverage reports whether r must be tagged or waived under -strict.
+func (c *Config) needsStrictCoverage(r Requirement, scope Scope) bool {
+	if !scope.Strict {
+		return false
+	}
+	phases := c.effectiveStrictPhases(scope)
+	if len(phases) > 0 {
+		if !stringIn(phases, r.MetaValue(c.phaseFieldName())) {
+			return false
+		}
+	}
+	classes := c.effectiveStrictKeywordClasses(scope)
+	if len(classes) > 0 {
+		if !stringIn(classes, r.Class) {
+			return false
+		}
+	}
+	for _, rule := range c.Policy.Rules {
+		if rule.AllowUncovered && policyMatches(rule, r) {
+			return false
+		}
+	}
+	return true
 }

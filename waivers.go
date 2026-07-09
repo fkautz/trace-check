@@ -9,6 +9,9 @@ import (
 
 // ParseWaivers extracts waiver entries from a waivers markdown file. An absent
 // file returns nil (no waivers). Malformed headings are returned as problems.
+//
+// When CoversField is configured, a "- Covers: <ID>" line is captured as the
+// structured covered-by target. Validation of the target happens in Check.
 func ParseWaivers(cfg *Config, path string) ([]WaiverEntry, []string, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- path is operator-supplied
 	if err != nil {
@@ -38,6 +41,11 @@ func ParseWaivers(cfg *Config, path string) ([]WaiverEntry, []string, error) {
 			// The whole remainder is the reason; trailing junk makes it invalid
 			// rather than being silently dropped.
 			cur.Reason = strings.TrimSpace(m[1])
+		}
+		if cfg.compiled.coversField != nil {
+			if m := cfg.compiled.coversField.FindStringSubmatch(line); m != nil && cur.Covers == "" {
+				cur.Covers = strings.TrimSpace(m[1])
+			}
 		}
 		if strings.HasPrefix(line, cfg.compiled.rationalePrefix) {
 			cur.HasRationale = true

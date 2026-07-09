@@ -7,6 +7,18 @@ type Requirement struct {
 	Keyword string // raw Keyword line content; empty for subtype entries
 	Section string
 	Class   string // "must", "should", "may", or a subtype class; "" if unclassifiable
+	// Meta holds optional catalog fields configured in CatalogConfig.Fields
+	// (e.g. Component, Phase, Kind, Invariant). Keyword and Section remain
+	// first-class and are not duplicated here.
+	Meta map[string]string
+}
+
+// MetaValue returns the named catalog metadata field, or "".
+func (r Requirement) MetaValue(name string) string {
+	if r.Meta == nil {
+		return ""
+	}
+	return r.Meta[name]
 }
 
 // TagRef is one test function that tags a requirement.
@@ -23,6 +35,9 @@ type WaiverEntry struct {
 	ID           string
 	Reason       string
 	HasRationale bool
+	// Covers is the structured covered-by target ID (from the Covers field).
+	// Empty when the waiver does not use structured covers.
+	Covers string
 }
 
 // ClassEntry is one requirement's classification.
@@ -30,4 +45,30 @@ type ClassEntry struct {
 	ID        string
 	Class     string
 	HasReason bool
+}
+
+// Architecture is a closed vocabulary of component and invariant names loaded
+// from an architecture registry file. Empty when architecture checking is off.
+type Architecture struct {
+	Components []string
+	Invariants []string
+	// componentSet / invariantSet are filled by LoadArchitecture for O(1) lookup.
+	componentSet map[string]bool
+	invariantSet map[string]bool
+}
+
+// HasComponent reports whether name is a registered architecture component.
+func (a *Architecture) HasComponent(name string) bool {
+	if a == nil {
+		return false
+	}
+	return a.componentSet[name]
+}
+
+// HasInvariant reports whether name is a registered architecture invariant.
+func (a *Architecture) HasInvariant(name string) bool {
+	if a == nil {
+		return false
+	}
+	return a.invariantSet[name]
 }
