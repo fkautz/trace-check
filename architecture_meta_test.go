@@ -601,6 +601,157 @@ func TestPolicyWaiverReasonsSatisfyValidation(t *testing.T) {
 	}
 }
 
+func TestStrictWaiverReasonsSatisfyBaseCoverage(t *testing.T) {
+	catalog := `# Catalog
+### REQ-CORE-001
+- Section: §1
+- Keyword: MUST
+`
+	tests := []struct {
+		name       string
+		reasons    []string
+		waiver     string
+		wantErr    bool
+		wantOutput string
+	}{
+		{
+			name:    "omitted preserves legacy any-waiver behavior",
+			reasons: nil,
+			waiver: `# Waivers
+### REQ-CORE-001
+- Reason: not-implemented
+- Rationale: legacy placeholder.
+`,
+		},
+		{
+			name:    "deliberate deviation accepted",
+			reasons: []string{"covered-by", "documented-deviation"},
+			waiver: `# Waivers
+### REQ-CORE-001
+- Reason: documented-deviation
+- Rationale: replaced by an external control.
+`,
+		},
+		{
+			name:       "placeholder rejected",
+			reasons:    []string{"covered-by", "documented-deviation"},
+			wantErr:    true,
+			wantOutput: `waiver reason "not-implemented" does not satisfy strict coverage`,
+			waiver: `# Waivers
+### REQ-CORE-001
+- Reason: not-implemented
+- Rationale: later.
+`,
+		},
+		{
+			name:       "explicit empty list rejects every waiver",
+			reasons:    []string{},
+			wantErr:    true,
+			wantOutput: `waiver reason "documented-deviation" does not satisfy strict coverage`,
+			waiver: `# Waivers
+### REQ-CORE-001
+- Reason: documented-deviation
+- Rationale: no waiver is accepted by this profile.
+`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Strict.WaiverReasonsSatisfy = tt.reasons
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			root := writeRepo(t, catalog, "", tt.waiver)
+			var out strings.Builder
+			err := Check(&cfg, Scope{
+				Root:    root,
+				Catalog: filepath.Join(root, "spec", "requirements.md"),
+				Waivers: filepath.Join(root, "spec", "waivers.md"),
+				Strict:  true,
+			}, &out)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(out.String(), tt.wantOutput) {
+					t.Fatalf("strict waiver unexpectedly accepted: %v\n%s", err, out.String())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("strict waiver unexpectedly rejected: %v\n%s", err, out.String())
+			}
+		})
+	}
+}
+
+func TestStrictCoveredByWaiverNeedsTaggedTarget(t *testing.T) {
+	cfg := Default()
+	cfg.Waivers.RequireCoversForCoveredBy = true
+	cfg.Strict.WaiverReasonsSatisfy = []string{"covered-by"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	catalog := `# Catalog
+### REQ-CORE-001
+- Section: §1
+- Keyword: MUST
+
+### REQ-CORE-002
+- Section: §1
+- Keyword: MUST
+`
+	waivers := `# Waivers
+### REQ-CORE-001
+- Reason: covered-by
+- Covers: REQ-CORE-002
+- Rationale: exact composite.
+
+### REQ-CORE-002
+- Reason: not-implemented
+- Rationale: target has no evidence yet.
+`
+	root := writeRepo(t, catalog, "", waivers)
+	var out strings.Builder
+	err := Check(&cfg, Scope{
+		Root:    root,
+		Catalog: filepath.Join(root, "spec", "requirements.md"),
+		Waivers: filepath.Join(root, "spec", "waivers.md"),
+		Strict:  true,
+	}, &out)
+	if err == nil || !strings.Contains(out.String(), "covered-by target REQ-CORE-002 has no tagged test for strict coverage") {
+		t.Fatalf("evidence-free covered-by accepted: %v\n%s", err, out.String())
+	}
+
+	mustWriteFile(t, root, "pkg_test.go", `package p
+import "testing"
+// Verifies: REQ-CORE-002
+func TestTarget(t *testing.T) {}
+`)
+	waivers = `# Waivers
+### REQ-CORE-001
+- Reason: covered-by
+- Covers: REQ-CORE-002
+- Rationale: exact composite.
+`
+	mustWriteFile(t, root, "spec/waivers.md", waivers)
+	out.Reset()
+	if err := Check(&cfg, Scope{
+		Root:    root,
+		Catalog: filepath.Join(root, "spec", "requirements.md"),
+		Waivers: filepath.Join(root, "spec", "waivers.md"),
+		Strict:  true,
+	}, &out); err != nil {
+		t.Fatalf("tag-backed covered-by rejected: %v\n%s", err, out.String())
+	}
+}
+
+func TestStrictWaiverReasonsSatisfyValidation(t *testing.T) {
+	cfg := Default()
+	cfg.Strict.WaiverReasonsSatisfy = []string{"no-such-reason"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "no-such-reason") {
+		t.Fatalf("unknown strict waiver reason accepted: %v", err)
+	}
+}
+
 func TestClassificationStrictWaiverSatisfies(t *testing.T) {
 	// The same waiver semantics apply to classification strictRequires.
 	cfg := Default()

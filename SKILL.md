@@ -186,6 +186,9 @@ CONFIG (-config FILE, JSON)
     strict.phases[]            Phase meta values in scope under -strict
     strict.keywordClasses[]    policy classes in scope under -strict (e.g. must)
     strict.phaseField          meta field for phase (default "Phase")
+    strict.waiverReasonsSatisfy[]  waiver reasons accepted for base strict coverage;
+                               omitted = any valid reason (legacy), [] = none;
+                               covered-by also needs a tagged Covers target
     profiles                   map of name -> {strict, strictPhases, strictKeywordClasses}
     matrix.primaryClass/primaryLabel / secondaryClass/secondaryLabel /
            bothLabel/primaryOnlyLabel/secondaryOnlyLabel / generatedBy
@@ -205,7 +208,11 @@ CONFIG (-config FILE, JSON)
       },
       "architecture": {"path": "docs/architecture.md"},
       "waivers": {"requireCoversForCoveredBy": true},
-      "strict": {"phases": ["1"], "keywordClasses": ["must"]},
+      "strict": {
+        "phases": ["1"],
+        "keywordClasses": ["must"],
+        "waiverReasonsSatisfy": ["covered-by", "documented-deviation"]
+      },
       "policy": {
         "rules": [
           {"when": {"Kind": ["encoding"]}, "strictRequiresCoverageClass": "conformance"},
@@ -268,6 +275,9 @@ PROBLEMS AND FIXES (each is printed as "  PROBLEM: <id>: <message>")
   duplicate waiver / classification         remove the duplicate block
   waived/classified but not in the catalog  add it to the catalog (or remove)
   no tagged test or waiver        (-strict) tag a test or add a waiver
+  waiver reason does not satisfy strict       tag a test or use an allowed,
+                                              deliberate waiver reason
+  covered-by target has no tagged test        tag the Covers target
   not classified            (file present)  add a classification entry
   <value> classification has no Reason      add "- Reason: ..."
   classified X but has a Y tag (stale)      reclassify, or remove the Y-class tag

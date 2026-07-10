@@ -72,7 +72,11 @@ registry:
     ]
   },
   "architecture": {"path": "docs/architecture.md"},
-  "strict": {"phases": ["1"], "keywordClasses": ["must"]},
+  "strict": {
+    "phases": ["1"],
+    "keywordClasses": ["must"],
+    "waiverReasonsSatisfy": ["covered-by", "documented-deviation"]
+  },
   "policy": {
     "rules": [
       {"when": {"Kind": ["encoding"]}, "strictRequiresCoverageClass": "conformance"},
@@ -100,14 +104,15 @@ Architecture file shape:
 - I-VERIFY — no exposure before verify
 ```
 
-Waivers vs. policy rules: a waiver always satisfies base `-strict` coverage,
-but a `strictRequiresCoverageClass` rule is only satisfied by a waiver whose
-reason is a *deliberate excusal* — by default `covered-by` and
-`documented-deviation`. A `not-implemented` placeholder does not pass a freeze
-gate, and a `covered-by` waiver only counts when its `Covers` target itself
-carries a tag of the required coverage class (evidence by proxy, not by
-assertion). Tune with `policy.waiverReasonsSatisfy` (an explicit `[]` means no
-waiver satisfies a policy rule).
+Waivers vs. policy rules: for backward compatibility, an omitted
+`strict.waiverReasonsSatisfy` lets any valid waiver satisfy base `-strict`
+coverage. Set it to the deliberate-excusal reasons a release gate accepts (or
+to `[]` to accept none). A configured `covered-by` reason only counts when its
+`Covers` target carries an actual tag. Separately, a
+`strictRequiresCoverageClass` rule is satisfied only by reasons in
+`policy.waiverReasonsSatisfy` — by default `covered-by` and
+`documented-deviation` — and covered-by's target must carry that required
+coverage class.
 
 Structured covered-by (optional but recommended):
 

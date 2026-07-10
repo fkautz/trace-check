@@ -148,10 +148,20 @@ func Check(cfg *Config, scope Scope, w io.Writer) error {
 
 	covered := 0
 	for _, r := range reqs {
-		if len(tags[r.ID]) > 0 || waived[r.ID].ID != "" {
+		hasTag := len(tags[r.ID]) > 0
+		wv, hasWaiver := waived[r.ID]
+		if hasTag || hasWaiver {
 			covered++
-		} else if cfg.needsStrictCoverage(r, scope) {
+		}
+		if !cfg.needsStrictCoverage(r, scope) || hasTag {
+			continue
+		}
+		if !hasWaiver {
 			problems = append(problems, fmt.Sprintf("%s (%s, %s): no tagged test or waiver", r.ID, displayKeyword(r), r.Section))
+			continue
+		}
+		if problem := cfg.strictWaiverProblem(wv, tags); problem != "" {
+			problems = append(problems, fmt.Sprintf("%s (%s): %s", r.ID, r.Section, problem))
 		}
 	}
 
@@ -182,6 +192,28 @@ func Check(cfg *Config, scope Scope, w io.Writer) error {
 		return fmt.Errorf("%d problem(s)", len(problems))
 	}
 	return nil
+}
+
+// strictWaiverProblem returns why a waiver does not satisfy base strict
+// coverage, or an empty string when it does. A nil allowlist preserves legacy
+// behavior. covered-by remains evidence by proxy and needs an actual tagged
+// target even when no coverage-class policy applies.
+func (c *Config) strictWaiverProblem(wv WaiverEntry, tags map[string][]TagRef) string {
+	if c.Strict.WaiverReasonsSatisfy == nil {
+		return ""
+	}
+	if !stringIn(c.Strict.WaiverReasonsSatisfy, wv.Reason) {
+		return fmt.Sprintf("waiver reason %q does not satisfy strict coverage", wv.Reason)
+	}
+	if wv.Reason == c.Waivers.CoveredByReason {
+		if wv.Covers == "" {
+			return "covered-by waiver has no Covers target for strict coverage"
+		}
+		if len(tags[wv.Covers]) == 0 {
+			return fmt.Sprintf("covered-by target %s has no tagged test for strict coverage", wv.Covers)
+		}
+	}
+	return ""
 }
 
 // detectCoveredByCycles reports cycles in the structured covered-by graph.

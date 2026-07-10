@@ -320,6 +320,34 @@ func TestLoadConfigExplicitEmptySliceKept(t *testing.T) {
 	}
 }
 
+func TestLoadConfigStrictWaiverReasonOmittedVsEmpty(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantNil bool
+		wantLen int
+	}{
+		{name: "omitted", body: `{}`, wantNil: true},
+		{name: "explicit empty", body: `{"strict":{"waiverReasonsSatisfy":[]}}`, wantLen: 0},
+		{name: "allowlist", body: `{"strict":{"waiverReasonsSatisfy":["documented-deviation"]}}`, wantLen: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "tracecheck.json")
+			if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantNil != (cfg.Strict.WaiverReasonsSatisfy == nil) || len(cfg.Strict.WaiverReasonsSatisfy) != tt.wantLen {
+				t.Fatalf("strict waiver reasons = %#v, want nil=%t len=%d", cfg.Strict.WaiverReasonsSatisfy, tt.wantNil, tt.wantLen)
+			}
+		})
+	}
+}
+
 func TestLoadConfigRejectsBadJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad.json")

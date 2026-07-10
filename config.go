@@ -233,6 +233,11 @@ type StrictConfig struct {
 	KeywordClasses []string `json:"keywordClasses"`
 	// PhaseField is the catalog metadata field holding the phase (default "Phase").
 	PhaseField string `json:"phaseField"`
+	// WaiverReasonsSatisfy controls which waiver reasons satisfy base strict
+	// coverage. Nil (omitted) preserves the legacy behavior where any valid
+	// waiver satisfies. An explicit empty list means no waiver satisfies. A
+	// covered-by reason also requires its Covers target to carry a tagged test.
+	WaiverReasonsSatisfy []string `json:"waiverReasonsSatisfy"`
 }
 
 // Profile is a named strictness/filter pack selected with -profile.
@@ -550,6 +555,11 @@ func (c *Config) Validate() error {
 	for i, r := range c.Policy.WaiverReasonsSatisfy {
 		if !stringIn(c.Waivers.Reasons, r) {
 			return fmt.Errorf("policy.waiverReasonsSatisfy[%d]: %q is not an allowed waiver reason (waivers.reasons)", i, r)
+		}
+	}
+	for i, r := range c.Strict.WaiverReasonsSatisfy {
+		if !stringIn(c.Waivers.Reasons, r) {
+			return fmt.Errorf("strict.waiverReasonsSatisfy[%d]: %q is not an allowed waiver reason (waivers.reasons)", i, r)
 		}
 	}
 
