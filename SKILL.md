@@ -149,6 +149,9 @@ CONFIG (-config FILE, JSON)
   Field reference:
     idGrammar.pattern          inner ID regex, no anchors (must match a whole ID)
     idGrammar.headingPrefix    literal ID start, for malformed-heading detection
+    idGrammar.headingCandidatePattern  regex matched at the start of any ID-like
+                               heading text (leading ^ is supported); overrides
+                               headingPrefix for multi-series catalogs
     idGrammar.seriesPattern    regex; capture group 1 = the scope series
     idGrammar.subtypes[]       {marker,class}: IDs containing marker need no Keyword
     catalog.keywordField       catalog label for the policy keyword ("Keyword")
@@ -248,6 +251,7 @@ TYPICAL TASKS
 
 PROBLEMS AND FIXES (each is printed as "  PROBLEM: <id>: <message>")
   malformed requirement heading             fix the ID in the "### " line
+  duplicate requirement ID                  remove or rename the duplicate catalog block
   missing/unclassifiable Keyword line       add "- Keyword: MUST|SHOULD|MAY"
                                             (or make it a subtype ID)
   missing required catalog field X          add "- X: ..." under the requirement

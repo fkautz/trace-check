@@ -1,8 +1,10 @@
 package tracecheck
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -50,6 +52,204 @@ func TestConfigRejectsBadSeriesPattern(t *testing.T) {
 	cfg.IDGrammar.SeriesPattern = "REQ-(" // unbalanced
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("bad series pattern accepted")
+	}
+}
+
+func TestConfigRejectsBadHeadingCandidatePattern(t *testing.T) {
+	cfg := Default()
+	cfg.IDGrammar.HeadingPrefix = ""
+	cfg.IDGrammar.HeadingCandidatePattern = "["
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("bad heading candidate pattern accepted")
+	}
+}
+
+func TestHeadingCandidatePatternDetectsMalformedMultiSeriesHeading(t *testing.T) {
+	cfg := Default()
+	cfg.IDGrammar.Pattern = `[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*-[0-9]+`
+	cfg.IDGrammar.HeadingPrefix = ""
+	cfg.IDGrammar.HeadingCandidatePattern = `^[A-Z][A-Z0-9-]*-`
+	cfg.IDGrammar.SeriesPattern = ""
+	cfg.IDGrammar.Subtypes = []Subtype{}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	catalog := `# Catalog
+
+### TERRAPIN-2 — valid
+- Section: §2
+- Keyword: MUST
+
+### ENC-BD-X — malformed
+- Section: §15
+- Keyword: MUST
+
+### Notes
+
+Narrative heading that is not ID-shaped.
+`
+	root := writeRepo(t, catalog, "", "")
+	reqs, problems, err := ParseCatalog(&cfg, filepath.Join(root, "spec", "requirements.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reqs) != 1 || reqs[0].ID != "TERRAPIN-2" {
+		t.Fatalf("requirements = %+v, want only TERRAPIN-2", reqs)
+	}
+	if len(problems) != 1 || !strings.Contains(problems[0], "ENC-BD-X") {
+		t.Fatalf("malformed multi-series heading not reported: %v", problems)
+	}
+}
+
+func TestConfigRejectsUnknownStrictPhaseField(t *testing.T) {
+	cfg := Default()
+	cfg.Catalog.Fields = []CatalogField{{Name: "Phase", Enum: []string{"1", "2"}}}
+	cfg.Strict.PhaseField = "Phaes"
+	cfg.Strict.Phases = []string{"1"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), `strict.phaseField: unknown field "Phaes"`) {
+		t.Fatalf("unknown strict phase field accepted: %v", err)
+	}
+}
+
+func TestConfigRejectsUnknownStrictPhaseValue(t *testing.T) {
+	cfg := Default()
+	cfg.Catalog.Fields = []CatalogField{{Name: "Phase", Enum: []string{"1", "2"}}}
+	cfg.Strict.Phases = []string{"I"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), `strict.phases: unknown Phase value "I"`) {
+		t.Fatalf("unknown strict phase value accepted: %v", err)
+	}
+}
+
+func TestConfigRejectsUnknownStrictKeywordClass(t *testing.T) {
+	cfg := Default()
+	cfg.Strict.KeywordClasses = []string{"msut"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), `strict.keywordClasses: unknown keyword class "msut"`) {
+		t.Fatalf("unknown strict keyword class accepted: %v", err)
+	}
+}
+
+func TestConfigRejectsUnknownProfileFilters(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile Profile
+		want    string
+	}{
+		{name: "phase", profile: Profile{Strict: true, StrictPhases: []string{"I"}}, want: `unknown Phase value "I"`},
+		{name: "class", profile: Profile{Strict: true, StrictKeywordClasses: []string{"msut"}}, want: `unknown keyword class "msut"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Catalog.Fields = []CatalogField{{Name: "Phase", Enum: []string{"1", "2"}}}
+			cfg.Profiles = map[string]Profile{"freeze": tt.profile}
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("unknown profile filter accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestCheckRejectsUnknownScopeFilters(t *testing.T) {
+	tests := []struct {
+		name  string
+		scope Scope
+		want  string
+	}{
+		{name: "phase", scope: Scope{Strict: true, StrictPhases: []string{"I"}}, want: `unknown Phase value "I"`},
+		{name: "class", scope: Scope{Strict: true, StrictKeywordClasses: []string{"msut"}}, want: `unknown keyword class "msut"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Catalog.Fields = []CatalogField{{Name: "Phase", Enum: []string{"1", "2"}}}
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			root := writeRepo(t, fixtureCatalog, "", "")
+			tt.scope.Root = root
+			tt.scope.Catalog = filepath.Join(root, "spec", "requirements.md")
+			if err := Check(&cfg, tt.scope, io.Discard); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("unknown scope filter accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestConfigRejectsUnknownPolicyMetadataField(t *testing.T) {
+	cfg := Default()
+	cfg.Catalog.Fields = []CatalogField{{Name: "Kind", Enum: []string{"encoding", "ops"}}}
+	cfg.Policy.Rules = []PolicyRule{{
+		When:                        map[string][]string{"Knd": {"encoding"}},
+		StrictRequiresCoverageClass: "unit",
+	}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), `unknown field "Knd"`) {
+		t.Fatalf("unknown policy field accepted: %v", err)
+	}
+}
+
+func TestConfigRejectsUnknownPolicyMetadataValue(t *testing.T) {
+	cfg := Default()
+	cfg.Catalog.Fields = []CatalogField{{Name: "Kind", Enum: []string{"encoding", "ops"}}}
+	cfg.Policy.Rules = []PolicyRule{{
+		When:                        map[string][]string{"Kind": {"encodng"}},
+		StrictRequiresCoverageClass: "unit",
+	}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), `unknown Kind value "encodng"`) {
+		t.Fatalf("unknown policy value accepted: %v", err)
+	}
+}
+
+func TestConfigRejectsUnknownPolicyCoverageClass(t *testing.T) {
+	cfg := Default()
+	cfg.Policy.Rules = []PolicyRule{{StrictRequiresCoverageClass: "integrtion"}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), `unknown coverage class "integrtion"`) {
+		t.Fatalf("unknown policy coverage class accepted: %v", err)
+	}
+}
+
+func TestConfigRejectsUnknownMatrixGroupField(t *testing.T) {
+	cfg := Default()
+	cfg.Catalog.Fields = []CatalogField{{Name: "Component", Enum: []string{"cas"}}}
+	cfg.Matrix.GroupBy = "Componet"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), `matrix.groupBy: unknown catalog field "Componet"`) {
+		t.Fatalf("unknown matrix group field accepted: %v", err)
+	}
+}
+
+func TestConfigRejectsContradictoryPolicyEffects(t *testing.T) {
+	tests := []struct {
+		name string
+		rule PolicyRule
+		want string
+	}{
+		{
+			name: "allow and require",
+			rule: PolicyRule{AllowUncovered: true, StrictRequiresCoverageClass: "unit"},
+			want: "allowUncovered cannot be combined with strictRequiresCoverageClass",
+		},
+		{
+			name: "require and forbid same class",
+			rule: PolicyRule{StrictRequiresCoverageClass: "unit", ForbidsCoverageClass: "unit"},
+			want: "requires and forbids coverage class",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Policy.Rules = []PolicyRule{tt.rule}
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("contradictory policy accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestConfigRejectsCatalogFieldWhitespace(t *testing.T) {
+	cfg := Default()
+	cfg.Catalog.Fields = []CatalogField{{Name: " Kind", Enum: []string{"encoding"}}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "leading or trailing whitespace") {
+		t.Fatalf("non-canonical catalog field accepted: %v", err)
 	}
 }
 

@@ -37,6 +37,9 @@ type Scope struct {
 // scope, writes a summary to w, regenerates the matrix when the run is clean,
 // and returns a non-nil error listing every integrity problem found.
 func Check(cfg *Config, scope Scope, w io.Writer) error {
+	if err := cfg.ValidateScope(scope); err != nil {
+		return fmt.Errorf("invalid scope: %w", err)
+	}
 	reqs, catalogProblems, err := ParseCatalog(cfg, scope.Catalog)
 	if err != nil {
 		return err
@@ -69,6 +72,7 @@ func Check(cfg *Config, scope Scope, w io.Writer) error {
 	}
 	problems = append(problems, archProblems...)
 	problems = append(problems, cfg.validateCatalogMeta(reqs, arch)...)
+	problems = append(problems, cfg.validatePolicyArchitectureValues(arch)...)
 
 	known := make(map[string]Requirement, len(reqs))
 	catalogSeries := make(map[string]bool)
@@ -290,6 +294,7 @@ func (c *Config) checkClassification(scope Scope, reqs []Requirement, known map[
 	}
 	var problems []string
 	problems = append(problems, classProblems...)
+	problems = append(problems, c.validateActiveClassification()...)
 
 	byName := make(map[string]ClassValue, len(c.Classification.Values))
 	var names []string

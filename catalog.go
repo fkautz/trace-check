@@ -22,15 +22,20 @@ func ParseCatalog(cfg *Config, path string) ([]Requirement, []string, error) {
 	}
 	var reqs []Requirement
 	var problems []string
+	seen := map[string]bool{}
 	var cur *Requirement
 	for _, line := range strings.Split(string(data), "\n") {
 		if m := cfg.compiled.catalogHeading.FindStringSubmatch(line); m != nil {
+			if seen[m[1]] {
+				problems = append(problems, fmt.Sprintf("%s: duplicate requirement ID %s", filepath.Base(path), m[1]))
+			}
+			seen[m[1]] = true
 			reqs = append(reqs, Requirement{ID: m[1], Title: m[2], Meta: map[string]string{}})
 			cur = &reqs[len(reqs)-1]
 			cur.Class = cfg.classFromID(cur.ID)
 			continue
 		}
-		if cfg.compiled.looseHeading.MatchString(line) {
+		if cfg.isHeadingCandidate(line) {
 			problems = append(problems, fmt.Sprintf("%s: malformed requirement heading %q", filepath.Base(path), line))
 			cur = nil
 			continue

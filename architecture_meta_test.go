@@ -135,6 +135,39 @@ func TestCatalogMetaEnumFromArchitecture(t *testing.T) {
 	}
 }
 
+func TestPolicyRejectsUnknownArchitectureMetadataValue(t *testing.T) {
+	cfg := Default()
+	cfg.Catalog.Fields = []CatalogField{
+		{Name: "Component", Required: true, EnumFrom: "architecture.components"},
+	}
+	cfg.Architecture.Path = "docs/architecture.md"
+	cfg.Policy.Rules = []PolicyRule{{
+		When:                        map[string][]string{"Component": {"typo-component"}},
+		StrictRequiresCoverageClass: "unit",
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	catalog := `# Catalog
+### REQ-CORE-001
+- Section: §1
+- Keyword: MUST
+- Component: fault-in
+`
+	root := writeRepo(t, catalog, "", "")
+	mustWriteFile(t, root, "docs/architecture.md", archFixture)
+
+	var out strings.Builder
+	err := Check(&cfg, Scope{
+		Root:    root,
+		Catalog: filepath.Join(root, "spec", "requirements.md"),
+	}, &out)
+	if err == nil || !strings.Contains(out.String(), `policy.rules[0].when: unknown Component value "typo-component"`) {
+		t.Fatalf("unknown architecture policy value accepted: %v\n%s", err, out.String())
+	}
+}
+
 func TestPhaseAwareStrict(t *testing.T) {
 	cfg := Default()
 	cfg.Catalog.Fields = []CatalogField{

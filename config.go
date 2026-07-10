@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -20,19 +21,19 @@ import (
 // so a config file names only the fields it changes. Always Validate() before
 // use — it compiles the regexes and rejects contradictory settings.
 type Config struct {
-	IDGrammar      IDGrammar           `json:"idGrammar"`
-	Catalog        CatalogConfig       `json:"catalog"`
-	KeywordClasses []KeywordClass      `json:"keywordClasses"`
-	Tag            TagConfig           `json:"tag"`
-	Coverage       CoverageConfig      `json:"coverage"`
-	Waivers        WaiverConfig        `json:"waivers"`
-	Classification ClassConfig         `json:"classification"`
-	Matrix         MatrixConfig        `json:"matrix"`
-	Architecture   ArchitectureConfig  `json:"architecture"`
-	Policy         PolicyConfig        `json:"policy"`
-	Strict         StrictConfig        `json:"strict"`
-	Profiles       map[string]Profile  `json:"profiles"`
-	SkipDirs       []string            `json:"skipDirs"`
+	IDGrammar      IDGrammar          `json:"idGrammar"`
+	Catalog        CatalogConfig      `json:"catalog"`
+	KeywordClasses []KeywordClass     `json:"keywordClasses"`
+	Tag            TagConfig          `json:"tag"`
+	Coverage       CoverageConfig     `json:"coverage"`
+	Waivers        WaiverConfig       `json:"waivers"`
+	Classification ClassConfig        `json:"classification"`
+	Matrix         MatrixConfig       `json:"matrix"`
+	Architecture   ArchitectureConfig `json:"architecture"`
+	Policy         PolicyConfig       `json:"policy"`
+	Strict         StrictConfig       `json:"strict"`
+	Profiles       map[string]Profile `json:"profiles"`
+	SkipDirs       []string           `json:"skipDirs"`
 
 	compiled compiledConfig
 }
@@ -48,6 +49,11 @@ type IDGrammar struct {
 	// an "### <HeadingPrefix>..." line that does not match Pattern is reported
 	// as malformed rather than silently skipped.
 	HeadingPrefix string `json:"headingPrefix"`
+	// HeadingCandidatePattern is an optional regex matched at the start of the
+	// text after "### ". When set, it replaces HeadingPrefix for malformed-
+	// heading detection. This lets multi-series catalogs recognize every
+	// ID-shaped heading without sharing one literal prefix.
+	HeadingCandidatePattern string `json:"headingCandidatePattern"`
 	// SeriesPattern's first capture group is the series segment used to scope
 	// tag checking (so a core run ignores another series' tags). Empty
 	// disables scoping (all tags share one series).
@@ -79,8 +85,8 @@ type CatalogConfig struct {
 
 // CatalogField describes one optional catalog metadata field.
 type CatalogField struct {
-	Name     string   `json:"name"`
-	Required bool     `json:"required"`
+	Name     string `json:"name"`
+	Required bool   `json:"required"`
 	// Enum is a closed set of allowed values. Empty means any non-empty value
 	// is accepted when the field is present (or required).
 	Enum []string `json:"enum"`
@@ -142,8 +148,8 @@ type CoverageRule struct {
 
 // WaiverConfig names the waiver markdown fields and the allowed reasons.
 type WaiverConfig struct {
-	ReasonField    string   `json:"reasonField"`
-	RationaleField string   `json:"rationaleField"`
+	ReasonField    string `json:"reasonField"`
+	RationaleField string `json:"rationaleField"`
 	// CoversField is the structured covered-by target line label (default
 	// "Covers"). Empty disables structured covers parsing.
 	CoversField string `json:"coversField"`
@@ -275,7 +281,7 @@ type compiledConfig struct {
 	fullID            *regexp.Regexp
 	catalogHeading    *regexp.Regexp
 	plainHeading      *regexp.Regexp // headings with no title (waivers/classification)
-	looseHeading      *regexp.Regexp
+	headingCandidate  *regexp.Regexp
 	keywordLine       *regexp.Regexp
 	sectionLine       *regexp.Regexp
 	sectionRef        *regexp.Regexp // nil if SectionRefPattern is empty
@@ -498,14 +504,20 @@ func (c *Config) Validate() error {
 	if err != nil {
 		return fmt.Errorf("idGrammar.pattern (plain heading): %w", err)
 	}
-	// Empty HeadingPrefix disables loose malformed-heading detection (useful when
-	// IDs span many series prefixes, e.g. DIGEST-1 / TERRAPIN-4 / ENC-BD-5).
-	var loose *regexp.Regexp
-	if strings.TrimSpace(c.IDGrammar.HeadingPrefix) != "" {
-		loose = regexp.MustCompile(`^###\s+` + regexp.QuoteMeta(c.IDGrammar.HeadingPrefix))
+	// HeadingCandidatePattern supports multi-series catalogs that have no common
+	// literal HeadingPrefix. When neither is set, malformed-heading detection is
+	// disabled.
+	var headingCandidate *regexp.Regexp
+	if c.IDGrammar.HeadingCandidatePattern != "" {
+		headingCandidate, err = regexp.Compile(`^(?:` + c.IDGrammar.HeadingCandidatePattern + `)`)
+		if err != nil {
+			return fmt.Errorf("idGrammar.headingCandidatePattern: %w", err)
+		}
+	} else if strings.TrimSpace(c.IDGrammar.HeadingPrefix) != "" {
+		headingCandidate = regexp.MustCompile(`^` + regexp.QuoteMeta(c.IDGrammar.HeadingPrefix))
 	} else {
 		// Never matches — malformed-prefix reporting is off.
-		loose = regexp.MustCompile(`^\b\B`) // impossible
+		headingCandidate = regexp.MustCompile(`^\b\B`) // impossible
 	}
 
 	var series *regexp.Regexp
@@ -542,11 +554,15 @@ func (c *Config) Validate() error {
 	}
 
 	metaFieldLines := map[string]*regexp.Regexp{}
+	metaFields := map[string]CatalogField{}
 	seenField := map[string]bool{}
 	for i, f := range c.Catalog.Fields {
 		name := strings.TrimSpace(f.Name)
 		if name == "" {
 			return fmt.Errorf("catalog.fields[%d].name is required", i)
+		}
+		if name != f.Name {
+			return fmt.Errorf("catalog.fields[%d].name %q has leading or trailing whitespace", i, f.Name)
 		}
 		if name == c.Catalog.KeywordField || name == c.Catalog.SectionField {
 			return fmt.Errorf("catalog.fields[%d].name %q collides with keywordField/sectionField", i, name)
@@ -555,6 +571,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("catalog.fields: duplicate field %q", name)
 		}
 		seenField[name] = true
+		metaFields[name] = f
 		switch f.EnumFrom {
 		case "", "architecture.components", "architecture.invariants":
 		default:
@@ -602,6 +619,12 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.Coverage.Default) == "" {
 		return fmt.Errorf("coverage.default is required")
 	}
+	for i, rule := range c.Coverage.Rules {
+		if strings.TrimSpace(rule.Class) == "" {
+			return fmt.Errorf("coverage.rules[%d].class is required", i)
+		}
+	}
+	coverageClasses := c.coverageClasses()
 
 	if strings.TrimSpace(c.Waivers.ReasonField) == "" {
 		return fmt.Errorf("waivers.reasonField is required")
@@ -636,6 +659,71 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("matrix.coverageColumns[%d].label is required", i)
 		}
 	}
+	if c.Matrix.GroupBy != "" && !seenField[c.Matrix.GroupBy] {
+		return fmt.Errorf("matrix.groupBy: unknown catalog field %q", c.Matrix.GroupBy)
+	}
+
+	keywordClassSet := map[string]bool{}
+	for _, class := range c.orderedClasses() {
+		keywordClassSet[class] = true
+	}
+	if err := c.validatePhaseFilter("strict.phases", c.Strict.Phases); err != nil {
+		return err
+	}
+	if err := c.validateKeywordClassFilter("strict.keywordClasses", c.Strict.KeywordClasses); err != nil {
+		return err
+	}
+	profileNames := make([]string, 0, len(c.Profiles))
+	for name := range c.Profiles {
+		profileNames = append(profileNames, name)
+	}
+	sort.Strings(profileNames)
+	for _, name := range profileNames {
+		profile := c.Profiles[name]
+		if err := c.validatePhaseFilter(fmt.Sprintf("profiles[%q].strictPhases", name), profile.StrictPhases); err != nil {
+			return err
+		}
+		if err := c.validateKeywordClassFilter(fmt.Sprintf("profiles[%q].strictKeywordClasses", name), profile.StrictKeywordClasses); err != nil {
+			return err
+		}
+	}
+	for i, rule := range c.Policy.Rules {
+		for field, values := range rule.When {
+			if len(values) == 0 {
+				return fmt.Errorf("policy.rules[%d].when[%q] must list at least one value", i, field)
+			}
+			if field == "KeywordClass" {
+				for _, value := range values {
+					if !keywordClassSet[value] {
+						return fmt.Errorf("policy.rules[%d].when: unknown KeywordClass value %q", i, value)
+					}
+				}
+				continue
+			}
+			meta, ok := metaFields[field]
+			if !ok {
+				return fmt.Errorf("policy.rules[%d].when: unknown field %q", i, field)
+			}
+			if len(meta.Enum) > 0 {
+				for _, value := range values {
+					if !stringIn(meta.Enum, value) {
+						return fmt.Errorf("policy.rules[%d].when: unknown %s value %q", i, field, value)
+					}
+				}
+			}
+		}
+		for _, class := range []string{rule.StrictRequiresCoverageClass, rule.ForbidsCoverageClass} {
+			if class != "" && !coverageClasses[class] {
+				return fmt.Errorf("policy.rules[%d]: unknown coverage class %q", i, class)
+			}
+		}
+		if rule.AllowUncovered && rule.StrictRequiresCoverageClass != "" {
+			return fmt.Errorf("policy.rules[%d]: allowUncovered cannot be combined with strictRequiresCoverageClass", i)
+		}
+		if rule.StrictRequiresCoverageClass != "" && rule.StrictRequiresCoverageClass == rule.ForbidsCoverageClass {
+			return fmt.Errorf("policy.rules[%d]: requires and forbids coverage class %q", i, rule.StrictRequiresCoverageClass)
+		}
+	}
 
 	usesArchEnum := false
 	for _, f := range c.Catalog.Fields {
@@ -653,7 +741,7 @@ func (c *Config) Validate() error {
 		fullID:            full,
 		catalogHeading:    catalogHeading,
 		plainHeading:      plainHeading,
-		looseHeading:      loose,
+		headingCandidate:  headingCandidate,
 		keywordLine:       keywordLine,
 		sectionLine:       sectionLine,
 		sectionRef:        sectionRef,
@@ -666,6 +754,131 @@ func (c *Config) Validate() error {
 		metaFieldLines:    metaFieldLines,
 	}
 	return nil
+}
+
+func (c *Config) validatePhaseFilter(label string, values []string) error {
+	if len(values) == 0 {
+		return nil
+	}
+	var field CatalogField
+	found := false
+	for _, candidate := range c.Catalog.Fields {
+		if candidate.Name == c.Strict.PhaseField {
+			field = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("strict.phaseField: unknown field %q", c.Strict.PhaseField)
+	}
+	if len(field.Enum) == 0 {
+		return nil
+	}
+	for _, value := range values {
+		if !stringIn(field.Enum, value) {
+			return fmt.Errorf("%s: unknown %s value %q", label, c.Strict.PhaseField, value)
+		}
+	}
+	return nil
+}
+
+func (c *Config) validateKeywordClassFilter(label string, values []string) error {
+	known := map[string]bool{}
+	for _, class := range c.orderedClasses() {
+		known[class] = true
+	}
+	for _, value := range values {
+		if !known[value] {
+			return fmt.Errorf("%s: unknown keyword class %q", label, value)
+		}
+	}
+	return nil
+}
+
+// ValidateScope checks effective CLI/profile overrides after they have been
+// applied. Check calls this defensively so programmatic callers cannot bypass
+// the same fail-closed validation enforced by the CLI.
+func (c *Config) ValidateScope(scope Scope) error {
+	if err := c.validatePhaseFilter("scope.strictPhases", c.effectiveStrictPhases(scope)); err != nil {
+		return err
+	}
+	return c.validateKeywordClassFilter("scope.strictKeywordClasses", c.effectiveStrictKeywordClasses(scope))
+}
+
+func (c *Config) coverageClasses() map[string]bool {
+	classes := map[string]bool{}
+	if c.Coverage.Default != "" {
+		classes[c.Coverage.Default] = true
+	}
+	for _, rule := range c.Coverage.Rules {
+		if rule.Class != "" {
+			classes[rule.Class] = true
+		}
+	}
+	return classes
+}
+
+func (c *Config) validateActiveClassification() []string {
+	coverageClasses := c.coverageClasses()
+	seenNames := map[string]bool{}
+	var problems []string
+	for i, value := range c.Classification.Values {
+		if seenNames[value.Name] {
+			problems = append(problems, fmt.Sprintf("classification.values[%d]: duplicate value %q", i, value.Name))
+		}
+		seenNames[value.Name] = true
+		for _, class := range []string{value.StrictRequiresCoverageClass, value.ForbidsCoverageClass} {
+			if class != "" && !coverageClasses[class] {
+				problems = append(problems, fmt.Sprintf("classification.values[%d]: unknown coverage class %q", i, class))
+			}
+		}
+		if value.StrictRequiresCoverageClass != "" && value.StrictRequiresCoverageClass == value.ForbidsCoverageClass {
+			problems = append(problems, fmt.Sprintf("classification.values[%d]: requires and forbids coverage class %q", i, value.StrictRequiresCoverageClass))
+		}
+	}
+	return problems
+}
+
+var markdownH3Prefix = regexp.MustCompile(`^###\s+`)
+
+// isHeadingCandidate reports whether a markdown H3 looks like an attempted
+// requirement ID heading. The configured candidate regex is applied to the
+// heading text itself, so a natural leading ^ anchor remains meaningful.
+func (c *Config) isHeadingCandidate(line string) bool {
+	loc := markdownH3Prefix.FindStringIndex(line)
+	return loc != nil && c.compiled.headingCandidate.MatchString(line[loc[1]:])
+}
+
+// validatePolicyArchitectureValues checks policy selector values whose catalog
+// fields draw their vocabulary from the loaded architecture registry. Static
+// enum selectors are rejected earlier by Validate.
+func (c *Config) validatePolicyArchitectureValues(arch *Architecture) []string {
+	fields := map[string]CatalogField{}
+	for _, field := range c.Catalog.Fields {
+		fields[field.Name] = field
+	}
+
+	var problems []string
+	for i, rule := range c.Policy.Rules {
+		for name, values := range rule.When {
+			field, ok := fields[name]
+			if !ok || field.EnumFrom == "" {
+				continue
+			}
+			allowed, err := c.fieldAllowedValues(field, arch)
+			if err != nil {
+				problems = append(problems, fmt.Sprintf("policy.rules[%d].when[%s]: %v", i, name, err))
+				continue
+			}
+			for _, value := range values {
+				if !allowed[value] {
+					problems = append(problems, fmt.Sprintf("policy.rules[%d].when: unknown %s value %q", i, name, value))
+				}
+			}
+		}
+	}
+	return problems
 }
 
 // seriesOf returns the series segment of an ID per SeriesPattern, or "" if the

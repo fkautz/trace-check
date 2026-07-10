@@ -27,7 +27,7 @@ func ParseClassification(cfg *Config, path string) ([]ClassEntry, []string, erro
 			cur = &entries[len(entries)-1]
 			continue
 		}
-		if cfg.compiled.looseHeading.MatchString(line) {
+		if cfg.isHeadingCandidate(line) {
 			problems = append(problems, fmt.Sprintf("%s: malformed heading %q", filepath.Base(path), line))
 			cur = nil
 			continue

@@ -161,6 +161,7 @@ explicit empty array (`"subtypes": []`) *removes* a default.
   "idGrammar": {
     "pattern": "REQ-[A-Z][A-Z0-9]*-(?:IMP-|DEC-)?\\d{3}",  // inner ID regex (no anchors)
     "headingPrefix": "REQ-",                            // for malformed-heading detection
+    "headingCandidatePattern": "",                     // regex alternative for multi-series IDs
     "seriesPattern": "^REQ-([A-Za-z0-9]+)-",            // group 1 = scope series
     "subtypes": [{"marker": "-IMP-", "class": "implicit"}]  // IDs with no Keyword line
   },
@@ -202,6 +203,16 @@ explicit empty array (`"subtypes": []`) *removes* a default.
   "skipDirs": [".git", "testdata", "docs"]
 }
 ```
+
+`headingCandidatePattern` is matched against the heading text after `### `;
+leading anchors therefore work as expected. When set, it takes precedence over
+`headingPrefix`. Choose it broadly enough to catch malformed IDs while excluding
+any narrative H3 headings used by the artifact format.
+
+Configuration validation rejects unknown policy selector fields, closed-set
+selector values, coverage classes, strict/profile filters, contradictory policy
+effects, and matrix grouping fields. Architecture-backed selector values are
+validated when the registry is loaded by a check.
 
 ### Collectors
 

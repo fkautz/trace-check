@@ -166,6 +166,72 @@ func TestParseCatalogFlagsMalformedHeadings(t *testing.T) {
 	}
 }
 
+func TestParseCatalogFlagsDuplicateRequirementIDs(t *testing.T) {
+	dup := fixtureCatalog + `
+### REQ-CORE-001 — Duplicate first rule
+- Section: §99
+- Keyword: MUST
+`
+	root := writeRepo(t, dup, "", "")
+	reqs, problems, err := ParseCatalog(cfgT(t), filepath.Join(root, "spec", "requirements.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reqs) != 6 {
+		t.Fatalf("got %d parsed requirements, want 6 so the duplicate remains inspectable", len(reqs))
+	}
+	if len(problems) != 1 || !strings.Contains(problems[0], "duplicate requirement ID REQ-CORE-001") {
+		t.Fatalf("duplicate catalog ID not reported: %v", problems)
+	}
+}
+
+func TestCheckRejectsDuplicateRequirementIDsWithoutWritingMatrix(t *testing.T) {
+	dup := fixtureCatalog + `
+### REQ-CORE-001 — Duplicate first rule
+- Section: §99
+- Keyword: MUST
+`
+	root := writeRepo(t, dup, fixtureTestFile, fixtureWaivers)
+	var out strings.Builder
+	err := runCore(root, "docs/traceability.md", false, &out)
+	if err == nil || !strings.Contains(out.String(), "duplicate requirement ID REQ-CORE-001") {
+		t.Fatalf("duplicate catalog passed Check: %v\n%s", err, out.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "docs", "traceability.md")); !os.IsNotExist(statErr) {
+		t.Fatalf("matrix written from duplicate catalog, stat error = %v", statErr)
+	}
+}
+
+func TestActiveClassificationRejectsUnknownCoverageClass(t *testing.T) {
+	cfg := Default()
+	cfg.Classification.Values = []ClassValue{{
+		Name:                 "not-observable",
+		ForbidsCoverageClass: "black-box",
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	root := writeRepo(t, `# Catalog
+### REQ-CORE-001
+- Section: §1
+- Keyword: MUST
+`, "", "")
+	mustWriteFile(t, root, "spec/classification.md", `# Classification
+### REQ-CORE-001
+- Class: not-observable
+`)
+	var out strings.Builder
+	err := Check(&cfg, Scope{
+		Root:           root,
+		Catalog:        filepath.Join(root, "spec", "requirements.md"),
+		Classification: filepath.Join(root, "spec", "classification.md"),
+	}, &out)
+	if err == nil || !strings.Contains(out.String(), `classification.values[0]: unknown coverage class "black-box"`) {
+		t.Fatalf("active classification accepted unknown coverage class: %v\n%s", err, out.String())
+	}
+}
+
 func TestParseWaiversFlagsMalformedHeadings(t *testing.T) {
 	bad := fixtureWaivers + "\n### REQ-CORE-01\n- Reason: covered-by\n- Rationale: x.\n"
 	root := writeRepo(t, fixtureCatalog, "", bad)
