@@ -1,10 +1,15 @@
 package tracecheck
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -36,6 +41,10 @@ type Config struct {
 	SkipDirs       []string           `json:"skipDirs"`
 
 	compiled compiledConfig
+	// sourcePath/sourceSHA256 bind provenance to the exact bytes LoadConfig
+	// decoded. They are deliberately excluded from the effective config JSON.
+	sourcePath   string
+	sourceSHA256 string
 }
 
 // IDGrammar defines the requirement-ID shape and how to derive a series (the
@@ -384,7 +393,12 @@ func Default() Config {
 // array ("subtypes": []) therefore removes a default, distinct from omitting
 // the key. The result is validated before return.
 func LoadConfig(path string) (Config, error) {
-	data, err := os.ReadFile(path) // #nosec G304 -- path is an operator-supplied config location
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolve config source %s: %w", path, err)
+	}
+	absolutePath = filepath.Clean(absolutePath)
+	data, err := os.ReadFile(absolutePath) // #nosec G304 -- path is an operator-supplied config location
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %s: %w", path, err)
 	}
@@ -415,6 +429,12 @@ func LoadConfig(path string) (Config, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return Config{}, fmt.Errorf("parse config %s: multiple JSON values", path)
+		}
+		return Config{}, fmt.Errorf("parse config %s: trailing content: %w", path, err)
 	}
 
 	// Restore any slice the JSON omitted (still nil) from the defaults; an
@@ -486,6 +506,9 @@ func LoadConfig(path string) (Config, error) {
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("invalid config %s: %w", path, err)
 	}
+	sum := sha256.Sum256(data)
+	cfg.sourcePath = absolutePath
+	cfg.sourceSHA256 = "sha256:" + hex.EncodeToString(sum[:])
 	return cfg, nil
 }
 
@@ -810,10 +833,193 @@ func (c *Config) validateKeywordClassFilter(label string, values []string) error
 // applied. Check calls this defensively so programmatic callers cannot bypass
 // the same fail-closed validation enforced by the CLI.
 func (c *Config) ValidateScope(scope Scope) error {
+	scope = normalizeScopePaths(scope)
+	if err := c.validateScopePaths(scope); err != nil {
+		return err
+	}
+	return c.validateScopeFilters(scope)
+}
+
+func (c *Config) validateScopeFilters(scope Scope) error {
+	if scope.CheckOutput && scope.Out == "" && scope.OutJSON == "" {
+		return fmt.Errorf("check-output requires -out and/or -out-json")
+	}
 	if err := c.validatePhaseFilter("scope.strictPhases", c.effectiveStrictPhases(scope)); err != nil {
 		return err
 	}
 	return c.validateKeywordClassFilter("scope.strictKeywordClasses", c.effectiveStrictKeywordClasses(scope))
+}
+
+func (c *Config) validateScopePaths(scope Scope) error {
+	configPath, err := c.effectiveConfigPath(scope)
+	if err != nil {
+		return err
+	}
+	paths := []struct {
+		label string
+		path  string
+	}{
+		{label: "out", path: scope.Out},
+		{label: "out-json", path: scope.OutJSON},
+		{label: "problems-json", path: scope.ProblemsJSON},
+	}
+	seenPaths := map[string]string{}
+	type existingOutput struct {
+		label string
+		path  string
+		info  os.FileInfo
+	}
+	var existingOutputs []existingOutput
+	for _, item := range paths {
+		if item.path == "" {
+			continue
+		}
+		resolved, err := filepath.Abs(resolveScopePath(scope.Root, item.path))
+		if err != nil {
+			return fmt.Errorf("resolve %s path: %w", item.label, err)
+		}
+		resolved = filepath.Clean(resolved)
+		identity := scopePathIdentity(resolved)
+		if previous, ok := seenPaths[identity]; ok {
+			return fmt.Errorf("output path collision: %s and %s both resolve to %s", previous, item.label, resolved)
+		}
+		if info, statErr := os.Stat(resolved); statErr == nil {
+			for _, previous := range existingOutputs {
+				if os.SameFile(previous.info, info) {
+					return fmt.Errorf("output path collision: %s (%s) and %s (%s) refer to the same file", previous.label, previous.path, item.label, resolved)
+				}
+			}
+			existingOutputs = append(existingOutputs, existingOutput{label: item.label, path: resolved, info: info})
+		}
+		seenPaths[identity] = item.label
+	}
+	inputs := []struct {
+		label string
+		path  string
+	}{
+		{label: "catalog", path: scope.Catalog},
+		{label: "classification", path: scope.Classification},
+		{label: "waivers", path: scope.Waivers},
+		{label: "architecture", path: c.effectiveArchitecturePath(scope)},
+		{label: "config", path: configPath},
+	}
+	for _, input := range inputs {
+		if input.path == "" {
+			continue
+		}
+		// Scope input paths are consumed exactly as supplied by the parsers.
+		// The CLI has already joined root-relative inputs to Root; joining here
+		// again would turn a relative Root such as "repo" into
+		// "repo/repo/spec/requirements.md" and miss destructive collisions.
+		resolved, err := filepath.Abs(input.path)
+		if err != nil {
+			return fmt.Errorf("resolve %s path: %w", input.label, err)
+		}
+		resolved = filepath.Clean(resolved)
+		if output, ok := seenPaths[scopePathIdentity(resolved)]; ok {
+			return fmt.Errorf("output/input path collision: %s and %s both resolve to %s", output, input.label, resolved)
+		}
+		if info, statErr := os.Stat(resolved); statErr == nil {
+			for _, output := range existingOutputs {
+				if os.SameFile(output.info, info) {
+					return fmt.Errorf("output/input path collision: %s (%s) and %s (%s) refer to the same file", output.label, output.path, input.label, resolved)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// scopePathIdentity resolves existing symlinks, symlinked parent directories,
+// and a dangling final symlink. Outputs may not exist yet, so Abs/Clean and
+// os.SameFile alone cannot prevent two declared paths from writing one file.
+func scopePathIdentity(path string) string {
+	identity := resolveScopePathIdentity(path, 0)
+	if scopeFilesystemCaseInsensitive(identity) {
+		return strings.ToLower(identity)
+	}
+	return identity
+}
+
+func resolveScopePathIdentity(path string, depth int) string {
+	cleaned := filepath.Clean(path)
+	if depth > 32 {
+		return cleaned
+	}
+	if evaluated, err := filepath.EvalSymlinks(cleaned); err == nil {
+		absolute, absErr := filepath.Abs(evaluated)
+		if absErr == nil {
+			return filepath.Clean(absolute)
+		}
+		return filepath.Clean(evaluated)
+	}
+	if target, err := os.Readlink(cleaned); err == nil {
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(cleaned), target)
+		}
+		return resolveScopePathIdentity(target, depth+1)
+	}
+	parent := filepath.Dir(cleaned)
+	if parent == cleaned {
+		return cleaned
+	}
+	return filepath.Join(resolveScopePathIdentity(parent, depth+1), filepath.Base(cleaned))
+}
+
+func scopeFilesystemCaseInsensitive(path string) bool {
+	dir := filepath.Dir(path)
+	for {
+		base := filepath.Base(dir)
+		alternate := swapFirstASCIICase(base)
+		if alternate != base {
+			info, err := os.Stat(dir)
+			alternateInfo, alternateErr := os.Stat(filepath.Join(filepath.Dir(dir), alternate))
+			switch {
+			case err == nil && alternateErr == nil:
+				return os.SameFile(info, alternateInfo)
+			case err == nil && os.IsNotExist(alternateErr):
+				return false
+			case os.IsNotExist(err) && alternateErr == nil:
+				return false
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+}
+
+func swapFirstASCIICase(value string) string {
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		switch {
+		case ch >= 'a' && ch <= 'z':
+			return value[:i] + string(ch-'a'+'A') + value[i+1:]
+		case ch >= 'A' && ch <= 'Z':
+			return value[:i] + string(ch-'A'+'a') + value[i+1:]
+		}
+	}
+	return value
+}
+
+func (c *Config) effectiveConfigPath(scope Scope) (string, error) {
+	if c.sourcePath == "" {
+		return scope.ConfigPath, nil
+	}
+	if scope.ConfigPath == "" {
+		return c.sourcePath, nil
+	}
+	resolved, err := filepath.Abs(scope.ConfigPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve config path: %w", err)
+	}
+	if filepath.Clean(resolved) != c.sourcePath {
+		return "", fmt.Errorf("config path %s does not match loaded config source %s", scope.ConfigPath, c.sourcePath)
+	}
+	return c.sourcePath, nil
 }
 
 func (c *Config) coverageClasses() map[string]bool {
@@ -966,6 +1172,7 @@ func (c *Config) ApplyProfile(name string, scope *Scope) error {
 	if !ok {
 		return fmt.Errorf("unknown profile %q", name)
 	}
+	scope.Profile = name
 	if p.Strict {
 		scope.Strict = true
 	}

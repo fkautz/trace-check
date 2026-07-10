@@ -176,6 +176,175 @@ func TestCheckRejectsUnknownScopeFilters(t *testing.T) {
 	}
 }
 
+func TestValidateScopeRejectsOutputPathCollisions(t *testing.T) {
+	cfg := Default()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	input := filepath.Join(root, "same.md")
+	tests := []Scope{
+		{Root: root, Out: "same.json", OutJSON: "same.json"},
+		{Root: root, Out: "same.json", ProblemsJSON: "same.json"},
+		{Root: root, OutJSON: "same.json", ProblemsJSON: "same.json"},
+		{Root: root, Out: "same.md", Catalog: input},
+		{Root: root, ProblemsJSON: "same.md", Waivers: input},
+		{Root: root, OutJSON: "same.md", Classification: input},
+		{Root: root, Out: "same.md", ConfigPath: input},
+	}
+	for _, scope := range tests {
+		if err := cfg.ValidateScope(scope); err == nil || !strings.Contains(err.Error(), "path collision") {
+			t.Errorf("colliding scope accepted: %+v: %v", scope, err)
+		}
+	}
+}
+
+func TestValidateScopeRejectsCollisionWithCLIShapedRelativeRoot(t *testing.T) {
+	cfg := Default()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	absRoot := t.TempDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relRoot, err := filepath.Rel(cwd, absRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := Scope{
+		Root:    relRoot,
+		Catalog: filepath.Join(relRoot, "spec", "requirements.md"),
+		Out:     "spec/requirements.md",
+	}
+	if err := cfg.ValidateScope(scope); err == nil || !strings.Contains(err.Error(), "output/input path collision") {
+		t.Fatalf("CLI-shaped relative-root collision accepted: %v", err)
+	}
+}
+
+func TestValidateScopeRejectsOutputAliasesToInputs(t *testing.T) {
+	cfg := Default()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	input := filepath.Join(root, "catalog.md")
+	if err := os.WriteFile(input, []byte("catalog\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("symlink", func(t *testing.T) {
+		output := filepath.Join(root, "matrix-symlink.md")
+		if err := os.Symlink(input, output); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if err := cfg.ValidateScope(Scope{Root: root, Catalog: input, Out: filepath.Base(output)}); err == nil || !strings.Contains(err.Error(), "path collision") {
+			t.Fatalf("symlinked output/input collision accepted: %v", err)
+		}
+	})
+	t.Run("hardlink", func(t *testing.T) {
+		output := filepath.Join(root, "matrix-hardlink.md")
+		if err := os.Link(input, output); err != nil {
+			t.Skipf("hardlink unavailable: %v", err)
+		}
+		if err := cfg.ValidateScope(Scope{Root: root, Catalog: input, Out: filepath.Base(output)}); err == nil || !strings.Contains(err.Error(), "path collision") {
+			t.Fatalf("hardlinked output/input collision accepted: %v", err)
+		}
+	})
+	t.Run("symlinked parents with missing target", func(t *testing.T) {
+		target := filepath.Join(root, "output-target")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		left := filepath.Join(root, "left")
+		right := filepath.Join(root, "right")
+		if err := os.Symlink(target, left); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if err := os.Symlink(target, right); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		scope := Scope{
+			Root:    root,
+			Out:     filepath.Join("left", "same.json"),
+			OutJSON: filepath.Join("right", "same.json"),
+		}
+		if err := cfg.ValidateScope(scope); err == nil || !strings.Contains(err.Error(), "output path collision") {
+			t.Fatalf("symlinked-parent output collision accepted: %v", err)
+		}
+	})
+	t.Run("dangling final symlink", func(t *testing.T) {
+		matrix := filepath.Join(root, "matrix.md")
+		alias := filepath.Join(root, "matrix-alias.md")
+		if err := os.Symlink(filepath.Base(matrix), alias); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		scope := Scope{Root: root, Out: filepath.Base(matrix), OutJSON: filepath.Base(alias)}
+		if err := cfg.ValidateScope(scope); err == nil || !strings.Contains(err.Error(), "output path collision") {
+			t.Fatalf("dangling-symlink output collision accepted: %v", err)
+		}
+	})
+	t.Run("dangling output aliases missing optional input", func(t *testing.T) {
+		classification := filepath.Join(root, "missing-classification.md")
+		problemsLink := filepath.Join(root, "problems-link.json")
+		if err := os.Symlink(filepath.Base(classification), problemsLink); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		scope := Scope{
+			Root:           root,
+			Classification: classification,
+			ProblemsJSON:   filepath.Base(problemsLink),
+		}
+		if err := cfg.ValidateScope(scope); err == nil || !strings.Contains(err.Error(), "output/input path collision") {
+			t.Fatalf("dangling output alias to missing input accepted: %v", err)
+		}
+	})
+}
+
+func TestValidateScopeBindsLoadedConfigSourcePath(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "tracecheck.json")
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(root, "other.json")
+	if err := cfg.ValidateScope(Scope{Root: root, ConfigPath: other}); err == nil || !strings.Contains(err.Error(), "does not match loaded config source") {
+		t.Fatalf("mismatched config source accepted: %v", err)
+	}
+	if err := cfg.ValidateScope(Scope{Root: root, Out: "tracecheck.json"}); err == nil || !strings.Contains(err.Error(), "output/input path collision") {
+		t.Fatalf("output collision with implicit loaded config source accepted: %v", err)
+	}
+}
+
+func TestValidateScopeRejectsCaseAliasedOutputsOnCaseInsensitiveFilesystem(t *testing.T) {
+	cfg := Default()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	probe := filepath.Join(root, "CaseProbe")
+	if err := os.WriteFile(probe, []byte("probe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "caseprobe")); os.IsNotExist(err) {
+		t.Skip("filesystem is case-sensitive")
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	scope := Scope{Root: root, Out: "same", OutJSON: "SAME"}
+	if err := cfg.ValidateScope(scope); err == nil || !strings.Contains(err.Error(), "output path collision") {
+		t.Fatalf("case-aliased outputs accepted: %v", err)
+	}
+	scope = Scope{Root: root, Out: filepath.Join("MissingDir", "same"), OutJSON: filepath.Join("MissingDir", "SAME")}
+	if err := cfg.ValidateScope(scope); err == nil || !strings.Contains(err.Error(), "output path collision") {
+		t.Fatalf("nested case-aliased outputs accepted: %v", err)
+	}
+}
+
 func TestConfigRejectsUnknownPolicyMetadataField(t *testing.T) {
 	cfg := Default()
 	cfg.Catalog.Fields = []CatalogField{{Name: "Kind", Enum: []string{"encoding", "ops"}}}
@@ -356,6 +525,21 @@ func TestLoadConfigRejectsBadJSON(t *testing.T) {
 	}
 	if _, err := LoadConfig(path); err == nil {
 		t.Fatal("malformed JSON accepted")
+	}
+}
+
+func TestLoadConfigRejectsTrailingContent(t *testing.T) {
+	for _, body := range []string{
+		"{}\n{}\n",
+		"{}\nGARBAGE\n",
+	} {
+		path := filepath.Join(t.TempDir(), "tracecheck.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadConfig(path); err == nil {
+			t.Fatalf("config with trailing content accepted: %q", body)
+		}
 	}
 }
 

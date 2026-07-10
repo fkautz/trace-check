@@ -13,7 +13,11 @@ import (
 // When CoversField is configured, a "- Covers: <ID>" line is captured as the
 // structured covered-by target. Validation of the target happens in Check.
 func ParseWaivers(cfg *Config, path string) ([]WaiverEntry, []string, error) {
-	data, err := os.ReadFile(path) // #nosec G304 -- path is operator-supplied
+	return parseWaiversWithRead(cfg, path, os.ReadFile)
+}
+
+func parseWaiversWithRead(cfg *Config, path string, readFile func(string) ([]byte, error)) ([]WaiverEntry, []string, error) {
+	data, err := readFile(path) // #nosec G304 -- path is operator-supplied by the caller
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil, nil

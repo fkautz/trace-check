@@ -20,10 +20,14 @@ import (
 // Headings match ## or ### with the configured section title. List items under
 // each section become closed-vocabulary names for catalog field enumFrom.
 func LoadArchitecture(cfg *Config, path string) (*Architecture, []string, error) {
+	return loadArchitectureWithRead(cfg, path, os.ReadFile)
+}
+
+func loadArchitectureWithRead(cfg *Config, path string, readFile func(string) ([]byte, error)) (*Architecture, []string, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, nil, nil
 	}
-	data, err := os.ReadFile(path) // #nosec G304 -- path is operator-supplied
+	data, err := readFile(path) // #nosec G304 -- path is operator-supplied by the caller
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil, fmt.Errorf("architecture file %s not found", path)

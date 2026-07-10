@@ -1,7 +1,10 @@
 package tracecheck
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -439,9 +442,707 @@ func TestOne(t *testing.T) {}
 	if mj.Summary.Total != 2 || mj.Summary.Tagged != 1 {
 		t.Fatalf("json summary = %+v", mj.Summary)
 	}
+	if strings.Contains(mj.GeneratedBy, "`") {
+		t.Fatalf("JSON generatedBy contains Markdown quoting: %q", mj.GeneratedBy)
+	}
 	if mj.Requirements[0].Meta["Phase"] != "1" && mj.Requirements[1].Meta["Phase"] != "1" {
 		t.Fatalf("meta not in json: %+v", mj.Requirements)
 	}
+}
+
+func TestProblemsJSONWrittenOnStrictFailure(t *testing.T) {
+	cfg := Default()
+	cfg.Catalog.Fields = []CatalogField{{Name: "Phase", Required: true, Enum: []string{"1"}}}
+	cfg.Profiles = map[string]Profile{
+		"phase1-freeze": {Strict: true, StrictPhases: []string{"1"}, StrictKeywordClasses: []string{"must"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	root := writeRepo(t, `# Catalog
+### REQ-CORE-001
+- Section: §1
+- Keyword: MUST
+- Phase: 1
+`, "", "")
+	scope := Scope{
+		Root:         root,
+		Catalog:      filepath.Join(root, "spec", "requirements.md"),
+		ProblemsJSON: "docs/problems.json",
+		ToolVersion:  "trace-check version=test revision=0123456789abcdef0123456789abcdef01234567 modified=false",
+	}
+	if err := cfg.ApplyProfile("phase1-freeze", &scope); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if err := Check(&cfg, scope, &out); err == nil {
+		t.Fatalf("strict check unexpectedly passed: %s", out.String())
+	}
+	data, err := os.ReadFile(filepath.Join(root, "docs", "problems.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report ProblemReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.SchemaVersion != 1 || report.Profile != "phase1-freeze" {
+		t.Fatalf("problem report metadata = %+v", report)
+	}
+	if !report.Complete || report.Artifacts.Catalog == nil || !report.Artifacts.Catalog.Present || report.Artifacts.Catalog.Path != "spec/requirements.md" || !strings.HasPrefix(report.Artifacts.Catalog.SHA256, "sha256:") {
+		t.Fatalf("problem report artifact provenance = %+v", report.Artifacts)
+	}
+	if !report.Scope.Strict || len(report.Scope.Phases) != 1 || report.Scope.Phases[0] != "1" || len(report.Scope.KeywordClasses) != 1 || report.Scope.KeywordClasses[0] != "must" {
+		t.Fatalf("problem report scope = %+v", report.Scope)
+	}
+	if report.ToolVersion != scope.ToolVersion || !strings.HasPrefix(report.ConfigDigest, "sha256:") {
+		t.Fatalf("problem report provenance = %+v", report)
+	}
+	if len(report.Problems) != 1 {
+		t.Fatalf("problems = %+v, want one", report.Problems)
+	}
+	problem := report.Problems[0]
+	if problem.Key != "coverage-required:REQ-CORE-001" || problem.Code != "coverage-required" || problem.Requirement != "REQ-CORE-001" || !problem.Baselinable {
+		t.Fatalf("problem = %+v", problem)
+	}
+}
+
+func TestProblemsJSONReplacesStaleReportBeforeInputFailure(t *testing.T) {
+	cfg := cfgT(t)
+	root := t.TempDir()
+	problemPath := filepath.Join(root, "problems.json")
+	if err := os.WriteFile(problemPath, []byte("stale\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := Check(cfg, Scope{
+		Root:         root,
+		Catalog:      filepath.Join(root, "missing-catalog.md"),
+		ProblemsJSON: "problems.json",
+	}, io.Discard)
+	if err == nil {
+		t.Fatal("missing catalog unexpectedly passed")
+	}
+	data, readErr := os.ReadFile(problemPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var report ProblemReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("stale report was not replaced with valid JSON: %v: %q", err, data)
+	}
+	if report.Complete || report.Artifacts.Catalog == nil || report.Artifacts.Catalog.Present {
+		t.Fatalf("early-failure report = %+v", report)
+	}
+}
+
+func TestProblemsJSONHashesTheReconciledInputSnapshot(t *testing.T) {
+	cfg := cfgT(t)
+	root := writeRepo(t, fixtureCatalog, fixtureTestFile, fixtureWaivers)
+	catalogPath := filepath.Join(root, "spec", "requirements.md")
+	original, err := os.ReadFile(catalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := append(append([]byte(nil), original...), []byte("\nchanged after reconciliation\n")...)
+	out := &mutatingWriter{mutate: func() {
+		if err := os.WriteFile(catalogPath, replacement, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	err = Check(cfg, Scope{
+		Root:         root,
+		Catalog:      catalogPath,
+		Waivers:      filepath.Join(root, "spec", "waivers.md"),
+		ProblemsJSON: "docs/problems.json",
+	}, out)
+	if err != nil {
+		t.Fatalf("snapshot-backed check failed after a later edit: %v\n%s", err, out.String())
+	}
+	data, err := os.ReadFile(filepath.Join(root, "docs", "problems.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report ProblemReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if !report.Complete || report.Summary.Total != 0 {
+		t.Fatalf("snapshot-backed report = %+v", report)
+	}
+	originalSum := sha256.Sum256(original)
+	wantDigest := "sha256:" + hex.EncodeToString(originalSum[:])
+	if report.Artifacts.Catalog == nil || report.Artifacts.Catalog.SHA256 != wantDigest {
+		t.Fatalf("catalog provenance = %+v, want pre-check digest %s", report.Artifacts.Catalog, wantDigest)
+	}
+	replacementSum := sha256.Sum256(replacement)
+	if report.Artifacts.Catalog.SHA256 == "sha256:"+hex.EncodeToString(replacementSum[:]) {
+		t.Fatal("report hashed the post-reconciliation replacement")
+	}
+}
+
+func TestProblemsJSONHashesTheConfigBytesLoadConfigDecoded(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "tracecheck.json")
+	original := []byte(`{"matrix":{"generatedBy":"loaded source"}}`)
+	if err := os.WriteFile(configPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"matrix":{"generatedBy":"replacement"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := writeRepo(t, fixtureCatalog, fixtureTestFile, fixtureWaivers)
+	if err := Check(&cfg, Scope{
+		Root:         root,
+		Catalog:      filepath.Join(root, "spec", "requirements.md"),
+		Waivers:      filepath.Join(root, "spec", "waivers.md"),
+		ConfigPath:   configPath,
+		ProblemsJSON: "docs/problems.json",
+	}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "docs", "problems.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report ProblemReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	wantSum := sha256.Sum256(original)
+	wantDigest := "sha256:" + hex.EncodeToString(wantSum[:])
+	if report.Artifacts.Config == nil || report.Artifacts.Config.SHA256 != wantDigest {
+		t.Fatalf("config provenance = %+v, want LoadConfig digest %s", report.Artifacts.Config, wantDigest)
+	}
+	if report.GeneratedBy != "loaded source" {
+		t.Fatalf("effective config came from replacement: generatedBy = %q", report.GeneratedBy)
+	}
+}
+
+func TestProblemsJSONSupportsCLIShapedRelativeRootInputs(t *testing.T) {
+	cfg := cfgT(t)
+	absRoot := writeRepo(t, fixtureCatalog, fixtureTestFile, fixtureWaivers)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relRoot, err := filepath.Rel(cwd, absRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Check(cfg, Scope{
+		Root:         relRoot,
+		Catalog:      filepath.Join(relRoot, "spec", "requirements.md"),
+		Waivers:      filepath.Join(relRoot, "spec", "waivers.md"),
+		ProblemsJSON: "docs/problems.json",
+	}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(relRoot, "docs", "problems.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report ProblemReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Artifacts.Catalog == nil || !report.Artifacts.Catalog.Present || report.Artifacts.Catalog.Path != "spec/requirements.md" {
+		t.Fatalf("relative-root catalog provenance = %+v", report.Artifacts.Catalog)
+	}
+}
+
+func TestProblemsJSONNormalizesSymlinkDotDotBeforeValidationAndIO(t *testing.T) {
+	target := t.TempDir()
+	configPath := filepath.Join(target, "tracecheck.json")
+	configBytes := []byte("{}\n")
+	if err := os.WriteFile(configPath, configBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(target, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := writeRepo(t, fixtureCatalog, fixtureTestFile, fixtureWaivers)
+	if err := os.Symlink(filepath.Join(target, "sub"), filepath.Join(root, "escape")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	rawProblemsPath := filepath.Join(root, "escape") + string(filepath.Separator) + ".." + string(filepath.Separator) + "tracecheck.json"
+	if err := Check(&cfg, Scope{
+		Root:         root,
+		Catalog:      filepath.Join(root, "spec", "requirements.md"),
+		Waivers:      filepath.Join(root, "spec", "waivers.md"),
+		ConfigPath:   configPath,
+		ProblemsJSON: rawProblemsPath,
+	}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	gotConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotConfig) != string(configBytes) {
+		t.Fatalf("symlink/.. output overwrote config source: %q", gotConfig)
+	}
+	normalizedReport := filepath.Join(root, "tracecheck.json")
+	data, err := os.ReadFile(normalizedReport)
+	if err != nil {
+		t.Fatalf("normalized report was not written: %v", err)
+	}
+	var report ProblemReport
+	if err := json.Unmarshal(data, &report); err != nil || !report.Complete {
+		t.Fatalf("normalized report = %+v, %v", report, err)
+	}
+}
+
+func TestProblemsJSONRecordsDeterministicTagEvidence(t *testing.T) {
+	cfg := cfgT(t)
+	root := writeRepo(t, fixtureCatalog, fixtureTestFile, fixtureWaivers)
+	if err := Check(cfg, Scope{
+		Root:         root,
+		Catalog:      filepath.Join(root, "spec", "requirements.md"),
+		Waivers:      filepath.Join(root, "spec", "waivers.md"),
+		ProblemsJSON: "docs/problems.json",
+	}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "docs", "problems.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report ProblemReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Evidence.Tags) != 3 {
+		t.Fatalf("tag evidence = %+v, want three records", report.Evidence)
+	}
+	for i, want := range []string{"REQ-CORE-001", "REQ-CORE-002", "REQ-CORE-003"} {
+		if report.Evidence.Tags[i].Requirement != want || report.Evidence.Tags[i].File != "pkg_test.go" || report.Evidence.Tags[i].Class != "unit" {
+			t.Fatalf("tag evidence[%d] = %+v", i, report.Evidence.Tags[i])
+		}
+	}
+	encoded, err := json.Marshal(report.Evidence.Tags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(encoded)
+	if report.Evidence.TagsSHA256 != "sha256:"+hex.EncodeToString(sum[:]) {
+		t.Fatalf("tag evidence digest = %q", report.Evidence.TagsSHA256)
+	}
+}
+
+func TestProblemsJSONMarksIntegrityProblemsUnbaselinable(t *testing.T) {
+	cfg := cfgT(t)
+	root := writeRepo(t, fixtureCatalog+`
+### REQ-CORE-001 — duplicate
+- Section: §9
+- Keyword: MUST
+`, fixtureTestFile, fixtureWaivers)
+	scope := Scope{
+		Root:         root,
+		Catalog:      filepath.Join(root, "spec", "requirements.md"),
+		Waivers:      filepath.Join(root, "spec", "waivers.md"),
+		ProblemsJSON: "docs/problems.json",
+	}
+	if err := Check(cfg, scope, io.Discard); err == nil {
+		t.Fatal("duplicate catalog unexpectedly passed")
+	}
+	data, err := os.ReadFile(filepath.Join(root, "docs", "problems.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report ProblemReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Problems) != 1 || report.Problems[0].Code != "integrity" || report.Problems[0].Baselinable {
+		t.Fatalf("integrity report = %+v", report)
+	}
+}
+
+func TestProblemsJSONSupportsAbsoluteOutputPath(t *testing.T) {
+	cfg := cfgT(t)
+	root := writeRepo(t, fixtureCatalog, fixtureTestFile, fixtureWaivers)
+	path := filepath.Join(t.TempDir(), "problems.json")
+	if err := Check(cfg, Scope{
+		Root:         root,
+		Catalog:      filepath.Join(root, "spec", "requirements.md"),
+		Waivers:      filepath.Join(root, "spec", "waivers.md"),
+		ProblemsJSON: path,
+	}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("absolute problems path not written: %v", err)
+	}
+}
+
+func TestCheckOutputDetectsDriftWithoutWriting(t *testing.T) {
+	cfg := cfgT(t)
+	root := writeRepo(t, fixtureCatalog, fixtureTestFile, fixtureWaivers)
+	scope := Scope{
+		Root:         root,
+		Catalog:      filepath.Join(root, "spec", "requirements.md"),
+		Waivers:      filepath.Join(root, "spec", "waivers.md"),
+		Out:          "docs/traceability.md",
+		OutJSON:      "docs/traceability.json",
+		ProblemsJSON: "docs/problems.json",
+	}
+	if err := Check(cfg, scope, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	scope.CheckOutput = true
+	if err := Check(cfg, scope, io.Discard); err != nil {
+		t.Fatalf("fresh generated outputs rejected: %v", err)
+	}
+	path := filepath.Join(root, "docs", "traceability.md")
+	const stale = "stale but must not be overwritten\n"
+	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if err := Check(cfg, scope, &out); err == nil || !strings.Contains(out.String(), "is stale") {
+		t.Fatalf("stale output accepted: %v\n%s", err, out.String())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != stale {
+		t.Fatalf("check-output rewrote stale file: %q", got)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "docs", "problems.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report ProblemReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Summary.Integrity != 1 || report.Summary.Baselinable != 0 {
+		t.Fatalf("output drift report = %+v", report)
+	}
+}
+
+func TestCheckOutputDoesNotCreateMissingOutput(t *testing.T) {
+	cfg := cfgT(t)
+	root := writeRepo(t, fixtureCatalog, fixtureTestFile, fixtureWaivers)
+	path := filepath.Join(root, "docs", "traceability.md")
+	var out strings.Builder
+	err := Check(cfg, Scope{
+		Root:        root,
+		Catalog:     filepath.Join(root, "spec", "requirements.md"),
+		Waivers:     filepath.Join(root, "spec", "waivers.md"),
+		Out:         "docs/traceability.md",
+		CheckOutput: true,
+	}, &out)
+	if err == nil || !strings.Contains(out.String(), "is missing") {
+		t.Fatalf("missing generated output accepted: %v\n%s", err, out.String())
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("check-output created missing file, stat error = %v", statErr)
+	}
+}
+
+func TestCheckOutputRunsThroughBaselinableStrictBacklog(t *testing.T) {
+	cfg := cfgT(t)
+	root := writeRepo(t, `# Catalog
+### REQ-CORE-001
+- Section: §1
+- Keyword: MUST
+`, "", "")
+	scope := Scope{
+		Root:         root,
+		Catalog:      filepath.Join(root, "spec", "requirements.md"),
+		Out:          "docs/traceability.md",
+		ProblemsJSON: "docs/problems.json",
+	}
+	if err := Check(cfg, scope, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "docs", "traceability.md")); err != nil {
+		t.Fatal(err)
+	}
+	scope.Strict = true
+	scope.CheckOutput = true
+	var out strings.Builder
+	if err := Check(cfg, scope, &out); err == nil {
+		t.Fatal("strict backlog with missing checked output unexpectedly passed")
+	}
+	if !strings.Contains(out.String(), "no tagged test or waiver") || !strings.Contains(out.String(), "generated output") || !strings.Contains(out.String(), "is missing") {
+		t.Fatalf("requested output check was skipped through strict backlog:\n%s", out.String())
+	}
+	data, err := os.ReadFile(filepath.Join(root, "docs", "problems.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report ProblemReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if !report.Scope.CheckOutput || report.Scope.MatrixMarkdown != "docs/traceability.md" || report.Summary.Baselinable != 1 || report.Summary.Integrity != 1 {
+		t.Fatalf("output-check scope/report = %+v", report)
+	}
+}
+
+func TestCheckOutputReportsWhenIntegrityBlocksRendering(t *testing.T) {
+	cfg := cfgT(t)
+	root := writeRepo(t, fixtureCatalog+`
+### REQ-CORE-001 — duplicate
+- Section: §9
+- Keyword: MUST
+`, fixtureTestFile, fixtureWaivers)
+	var out strings.Builder
+	err := Check(cfg, Scope{
+		Root:        root,
+		Catalog:     filepath.Join(root, "spec", "requirements.md"),
+		Waivers:     filepath.Join(root, "spec", "waivers.md"),
+		Out:         "docs/traceability.md",
+		CheckOutput: true,
+	}, &out)
+	if err == nil || !strings.Contains(out.String(), "verification skipped because traceability integrity problems") {
+		t.Fatalf("unsafe output verification was silently skipped: %v\n%s", err, out.String())
+	}
+}
+
+func TestProblemReportWriteFailurePreservesHumanDiagnostics(t *testing.T) {
+	cfg := cfgT(t)
+	root := writeRepo(t, `# Catalog
+### REQ-CORE-001
+- Section: §1
+- Keyword: MUST
+`, "", "")
+	problemPath := filepath.Join(root, "docs", "problems.json")
+	out := &mutatingWriter{mutate: func() {
+		if err := os.Remove(problemPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(problemPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	err := Check(cfg, Scope{
+		Root:         root,
+		Catalog:      filepath.Join(root, "spec", "requirements.md"),
+		Strict:       true,
+		ProblemsJSON: "docs/problems.json",
+	}, out)
+	if err == nil || !strings.Contains(err.Error(), "additionally failed to write problems JSON") {
+		t.Fatalf("problem report write failure not returned: %v", err)
+	}
+	if !strings.Contains(out.String(), "no tagged test or waiver") {
+		t.Fatalf("human diagnostics suppressed: %s", out.String())
+	}
+}
+
+func TestProblemReportLateSymlinkSwapCannotOverwriteCatalog(t *testing.T) {
+	cfg := cfgT(t)
+	root := writeRepo(t, fixtureCatalog, fixtureTestFile, fixtureWaivers)
+	catalogPath := filepath.Join(root, "spec", "requirements.md")
+	catalogBefore, err := os.ReadFile(catalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	problemPath := filepath.Join(root, "docs", "problems.json")
+	out := &mutatingWriter{mutate: func() {
+		if err := os.Remove(problemPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(catalogPath, problemPath); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	if err := Check(cfg, Scope{
+		Root:         root,
+		Catalog:      catalogPath,
+		Waivers:      filepath.Join(root, "spec", "waivers.md"),
+		ProblemsJSON: "docs/problems.json",
+	}, out); err != nil {
+		t.Fatal(err)
+	}
+	catalogAfter, err := os.ReadFile(catalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(catalogAfter) != string(catalogBefore) {
+		t.Fatal("late report-path symlink swap overwrote the catalog")
+	}
+	info, err := os.Lstat(problemPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("final report followed or retained the injected symlink")
+	}
+	data, err := os.ReadFile(problemPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report ProblemReport
+	if err := json.Unmarshal(data, &report); err != nil || !report.Complete {
+		t.Fatalf("atomic final report = %+v, %v", report, err)
+	}
+}
+
+func TestProblemReportParentSymlinkSwapCannotRedirectFinalWrite(t *testing.T) {
+	cfg := cfgT(t)
+	root := t.TempDir()
+	catalogPath := filepath.Join(root, "spec", "report.json")
+	mustWriteFile(t, root, "spec/report.json", fixtureCatalog)
+	mustWriteFile(t, root, "pkg_test.go", fixtureTestFile)
+	mustWriteFile(t, root, "spec/waivers.md", fixtureWaivers)
+	catalogBefore, err := os.ReadFile(catalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	safeDir := filepath.Join(root, "safe-output")
+	if err := os.Mkdir(safeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outputParent := filepath.Join(root, "out-link")
+	if err := os.Symlink(safeDir, outputParent); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	out := &mutatingWriter{mutate: func() {
+		if err := os.Remove(outputParent); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(root, "spec"), outputParent); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	if err := Check(cfg, Scope{
+		Root:         root,
+		Catalog:      catalogPath,
+		Waivers:      filepath.Join(root, "spec", "waivers.md"),
+		ProblemsJSON: filepath.Join("out-link", "report.json"),
+	}, out); err != nil {
+		t.Fatal(err)
+	}
+	catalogAfter, err := os.ReadFile(catalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(catalogAfter) != string(catalogBefore) {
+		t.Fatal("parent symlink swap redirected final report into the catalog")
+	}
+	data, err := os.ReadFile(filepath.Join(safeDir, "report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report ProblemReport
+	if err := json.Unmarshal(data, &report); err != nil || !report.Complete {
+		t.Fatalf("descriptor-bound final report = %+v, %v", report, err)
+	}
+}
+
+func TestProblemReportRelativePathsIgnoreWriterChdir(t *testing.T) {
+	cfg := cfgT(t)
+	root := writeRepo(t, fixtureCatalog, fixtureTestFile, fixtureWaivers)
+	startingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(startingDir) })
+	relRoot, err := filepath.Rel(startingDir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDir := t.TempDir()
+	out := &mutatingWriter{mutate: func() {
+		if err := os.Chdir(otherDir); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	err = Check(cfg, Scope{
+		Root:         relRoot,
+		Catalog:      filepath.Join(relRoot, "spec", "requirements.md"),
+		Waivers:      filepath.Join(relRoot, "spec", "waivers.md"),
+		ProblemsJSON: "docs/problems.json",
+	}, out)
+	if restoreErr := os.Chdir(startingDir); restoreErr != nil {
+		t.Fatal(restoreErr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "docs", "problems.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report ProblemReport
+	if err := json.Unmarshal(data, &report); err != nil || !report.Complete || report.Artifacts.Catalog == nil || !report.Artifacts.Catalog.Present {
+		t.Fatalf("cwd-stable report = %+v, %v", report, err)
+	}
+	if _, err := os.Stat(filepath.Join(otherDir, "docs", "problems.json")); !os.IsNotExist(err) {
+		t.Fatalf("writer chdir redirected final report: %v", err)
+	}
+}
+
+func TestGeneratedOutputReplacesSymlinkWithoutFollowingIt(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "catalog.md")
+	const original = "control artifact\n"
+	if err := os.WriteFile(target, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(root, "matrix.md")
+	if err := os.Symlink(target, output); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := writeOrCheckGenerated(output, []byte("generated\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	gotTarget, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotTarget) != original {
+		t.Fatal("generated output followed a symlink into a control artifact")
+	}
+	gotOutput, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotOutput) != "generated\n" {
+		t.Fatalf("generated output = %q", gotOutput)
+	}
+}
+
+func TestGeneratedOutputPreservesExistingRegularFileMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "matrix.md")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeOrCheckGenerated(path, []byte("new\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("generated output mode = %o, want 644", got)
+	}
+}
+
+type mutatingWriter struct {
+	strings.Builder
+	mutated bool
+	mutate  func()
+}
+
+func (w *mutatingWriter) Write(p []byte) (int, error) {
+	if !w.mutated {
+		w.mutated = true
+		w.mutate()
+	}
+	return w.Builder.Write(p)
 }
 
 func TestMultiColumnMatrixAndGroupBy(t *testing.T) {

@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"os"
+	"runtime/debug"
 	"testing"
 )
 
@@ -48,5 +49,43 @@ func TestSkillDocInSync(t *testing.T) {
 	}
 	if string(got) != want {
 		t.Errorf("SKILL.md is stale; regenerate with `go test ./cmd/trace-check -run TestSkillDocInSync -update`")
+	}
+}
+
+func TestFormatBuildVersion(t *testing.T) {
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	info := &debug.BuildInfo{
+		Main: debug.Module{Version: "v1.2.3"},
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: revision},
+			{Key: "vcs.modified", Value: "false"},
+		},
+	}
+	want := "trace-check version=v1.2.3 revision=" + revision + " modified=false"
+	if got := formatBuildVersion(info); got != want {
+		t.Fatalf("formatBuildVersion() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatBuildVersionModuleCacheBuildHasHonestUnknownVCS(t *testing.T) {
+	info := &debug.BuildInfo{Main: debug.Module{Version: "v1.2.3"}}
+	want := "trace-check version=v1.2.3 revision=unknown modified=unknown"
+	if got := formatBuildVersion(info); got != want {
+		t.Fatalf("formatBuildVersion() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatBuildVersionUsesInjectedPinnedProvenance(t *testing.T) {
+	oldVersion, oldRevision, oldModified := buildVersion, buildRevision, buildModified
+	t.Cleanup(func() {
+		buildVersion, buildRevision, buildModified = oldVersion, oldRevision, oldModified
+	})
+	buildVersion = "pinned"
+	buildRevision = "0123456789abcdef0123456789abcdef01234567"
+	buildModified = "false"
+	info := &debug.BuildInfo{Main: debug.Module{Version: "v1.2.3"}}
+	want := "trace-check version=pinned revision=" + buildRevision + " modified=false"
+	if got := formatBuildVersion(info); got != want {
+		t.Fatalf("formatBuildVersion() = %q, want %q", got, want)
 	}
 }

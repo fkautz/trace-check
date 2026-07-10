@@ -343,6 +343,16 @@ func TestClassificationAbsentIsDormant(t *testing.T) {
 	}
 }
 
+func TestClassificationExistingEmptyFileIsActive(t *testing.T) {
+	root := writeRepo(t, fixtureCatalog, fixtureTestFile, "")
+	writeClassification(t, root, "# Classification\n")
+	var out strings.Builder
+	err := runCore(root, "", false, &out)
+	if err == nil || !strings.Contains(out.String(), "not classified") {
+		t.Fatalf("existing empty classification file treated as dormant: %v\n%s", err, out.String())
+	}
+}
+
 func TestClassificationValidPasses(t *testing.T) {
 	root := writeRepo(t, fixtureCatalog, fixtureTestFile, "")
 	addScenario(t, root, "TestScenarioTwo", "REQ-CORE-002")

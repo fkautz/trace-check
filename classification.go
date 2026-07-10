@@ -11,14 +11,20 @@ import (
 // absent file returns nil entries (the feature is dormant). Malformed headings
 // are returned as problems.
 func ParseClassification(cfg *Config, path string) ([]ClassEntry, []string, error) {
-	data, err := os.ReadFile(path) // #nosec G304 -- path is operator-supplied
+	return parseClassificationWithRead(cfg, path, os.ReadFile)
+}
+
+func parseClassificationWithRead(cfg *Config, path string, readFile func(string) ([]byte, error)) ([]ClassEntry, []string, error) {
+	data, err := readFile(path) // #nosec G304 -- path is operator-supplied by the caller
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil, nil
 		}
 		return nil, nil, err
 	}
-	var entries []ClassEntry
+	// A successfully read but empty/prose-only file is active and therefore
+	// missing every catalog requirement. Only an absent file is dormant.
+	entries := make([]ClassEntry, 0)
 	var problems []string
 	var cur *ClassEntry
 	for _, line := range strings.Split(string(data), "\n") {

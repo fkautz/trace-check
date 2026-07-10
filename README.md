@@ -55,7 +55,10 @@ via config `strict.*`, flags `-strict-phase` / `-strict-class`, or a named
 `-profile`.
 
 On a clean run it regenerates the matrix at `-out` (and optional `-out-json`).
-On any problem it writes nothing and exits non-zero.
+`-check-output` compares those files byte-for-byte without rewriting them.
+On any traceability problem matrix outputs remain untouched and the command
+exits non-zero; `-problems-json` is the deliberate exception and records
+deterministic diagnostics on both clean and failed checks.
 
 ### Architecture adherence
 
@@ -242,6 +245,8 @@ columns — the **primary** class and the configured **secondary** class — and
 trace-check                 # default dialect; integrity + regenerate matrix
 trace-check -strict         # release gate: full coverage required
 trace-check -config tracecheck.json -strict     # custom dialect
+trace-check -config tracecheck.json -check-output  # generated-file drift gate
+trace-check -version                            # available build provenance
 
 # a second scope sharing the dialect:
 trace-check -catalog server/spec/requirements.md \
@@ -258,9 +263,38 @@ trace-check -catalog server/spec/requirements.md \
 | `-classification` | classification path; absent file is dormant |
 | `-waivers` | waivers path; absent file means none |
 | `-out` | matrix output path; empty disables generation |
+| `-out-json` | machine-readable matrix output path |
+| `-problems-json` | deterministic diagnostic report, written even when the check fails |
+| `-check-output` | compare matrix outputs without writing |
 | `-strict` | enforce the full-coverage policy |
+| `-strict-phase` / `-strict-class` | override strict scope filters |
+| `-profile` | apply a named strictness/filter profile |
+| `-version` | print module/build version and available VCS provenance |
 
-Exit status: `0` clean, `1` traceability problems, `2` bad usage / invalid config.
+Exit status: `0` clean, `1` traceability or output I/O problems, `2` bad usage /
+invalid config. Reconciliation findings prevent matrix generation; an I/O
+failure on a later file in a multi-output generation can leave an earlier file
+updated, so CI drift gates should use the non-writing `-check-output` mode.
+
+### Problem reports and ratchets
+
+`-problems-json` emits schema version 1 with the selected profile, summary
+counts, effective strict scope, config digest, CLI build metadata, and
+named control-artifact paths/content digests from the exact bytes reconciled,
+sorted successful tag evidence with its digest, output-verification scope, and
+problems sorted and deduplicated by stable key. Coverage evidence records tags
+rather than hashing every source-tree byte. Reports carry `complete: false`
+until reconciliation finishes, so fatal input failures replace rather than
+preserve a stale baseline. Only strict backlog codes are marked
+`baselinable`: `coverage-required`, `coverage-class-required`,
+`waiver-reason-not-accepted`, and `waiver-proxy-not-covered`. Parser,
+configuration, catalog, waiver, classification, and tag problems use the
+`integrity` code and must never be accepted into a backlog baseline.
+
+When `-check-output` is requested, expected baselinable strict-backlog findings
+do not skip the byte comparison. If an integrity finding makes safe matrix
+rendering impossible, the report adds a non-baselinable “verification skipped”
+problem instead of claiming the output gate ran.
 
 ## Full reference
 

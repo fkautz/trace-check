@@ -16,7 +16,11 @@ import (
 // enum validation for those fields is performed later in Check (once an
 // architecture registry, if any, is loaded).
 func ParseCatalog(cfg *Config, path string) ([]Requirement, []string, error) {
-	data, err := os.ReadFile(path) // #nosec G304 -- path is operator-supplied
+	return parseCatalogWithRead(cfg, path, os.ReadFile)
+}
+
+func parseCatalogWithRead(cfg *Config, path string, readFile func(string) ([]byte, error)) ([]Requirement, []string, error) {
+	data, err := readFile(path) // #nosec G304 -- path is operator-supplied by the caller
 	if err != nil {
 		return nil, nil, err
 	}
