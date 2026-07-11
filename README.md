@@ -122,11 +122,17 @@ Structured covered-by (optional but recommended):
 ```markdown
 ### REQ-API-008
 - Reason: covered-by
-- Covers: REQ-API-001
-- Rationale: special case of 001.
+- Covers: REQ-API-001, REQ-API-002
+- Rationale: union of 001 and 002.
 ```
 
-Set `waivers.requireCoversForCoveredBy` to require the `Covers` line.
+`Covers` is a comma-separated list, so a composite may name every covering
+requirement; each is checked (well-formed, in the catalog, not itself, no cycle).
+Set `waivers.requireCoversForCoveredBy` to require the `Covers` line. Set
+`waivers.coversForbidTargetReasons` (e.g. `["superseded"]`) to flag a `Covers`
+target whose own waiver reason is in that list — a covered-by must point at an
+active covering requirement, not one that was itself excused away (a retired /
+superseded id, or a not-implemented placeholder).
 
 ### Multiple scopes
 

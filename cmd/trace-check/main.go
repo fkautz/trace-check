@@ -364,9 +364,13 @@ CONFIG (-config FILE, JSON)
     coverage.default           class for tags matching no rule ("unit")
     coverage.rules[]           {class,pathPrefixes[],funcPrefixes[]}: first match wins
     waivers.reasonField / rationaleField / reasons[]
-    waivers.coversField        structured covered-by target label ("Covers")
+    waivers.coversField        structured covered-by target label ("Covers");
+                               the Covers line is a comma-separated ID list
     waivers.coveredByReason    reason value for covered-by ("covered-by")
     waivers.requireCoversForCoveredBy  require Covers line for covered-by
+    waivers.coversForbidTargetReasons[]  waiver reasons a Covers target may not
+                               carry (e.g. ["superseded"] to catch a covered-by
+                               that still names a retired requirement); empty = off
     classification.classField / reasonField / values[]
                                values[]: {name, requiresReason, forbidsCoverageClass,
                                strictRequiresCoverageClass}
@@ -467,6 +471,8 @@ PROBLEMS AND FIXES (each is printed as "  PROBLEM: <id>: <message>")
   waiver has no Rationale line              add "- Rationale: ..."
   covered-by waiver has no Covers line      add "- Covers: <ID>" (when required)
   Covers target not in the catalog          fix the target ID
+  Covers target is <reason>; repoint ...    point at the successor, not a
+                                            superseded/placeholder requirement
   covered-by cycle                          break the Covers cycle
   has both a waiver and tagged tests        remove the waiver OR the test tag
   duplicate waiver / classification         remove the duplicate block

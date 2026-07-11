@@ -167,7 +167,13 @@ type WaiverConfig struct {
 	CoveredByReason string `json:"coveredByReason"`
 	// RequireCoversForCoveredBy requires a Covers line when Reason is
 	// CoveredByReason. Off by default for backward compatibility.
-	RequireCoversForCoveredBy bool     `json:"requireCoversForCoveredBy"`
+	RequireCoversForCoveredBy bool `json:"requireCoversForCoveredBy"`
+	// CoversForbidTargetReasons flags a Covers target whose OWN waiver reason is
+	// in this list — a covered-by must point at an active covering requirement,
+	// not one that was itself excused away. Set e.g. ["superseded"] to catch a
+	// covered-by that still names a retired/superseded requirement. Empty (the
+	// default) disables the check. Each entry must be an allowed waiver reason.
+	CoversForbidTargetReasons []string `json:"coversForbidTargetReasons"`
 	Reasons                   []string `json:"reasons"`
 }
 
@@ -416,6 +422,7 @@ func LoadConfig(path string) (Config, error) {
 	cfg.Coverage.Rules = nil
 	cfg.Classification.Values = nil
 	cfg.Waivers.Reasons = nil
+	cfg.Waivers.CoversForbidTargetReasons = nil
 	cfg.Catalog.Fields = nil
 	cfg.Matrix.CoverageColumns = nil
 	cfg.Policy.Rules = nil
@@ -583,6 +590,11 @@ func (c *Config) Validate() error {
 	for i, r := range c.Strict.WaiverReasonsSatisfy {
 		if !stringIn(c.Waivers.Reasons, r) {
 			return fmt.Errorf("strict.waiverReasonsSatisfy[%d]: %q is not an allowed waiver reason (waivers.reasons)", i, r)
+		}
+	}
+	for i, r := range c.Waivers.CoversForbidTargetReasons {
+		if !stringIn(c.Waivers.Reasons, r) {
+			return fmt.Errorf("waivers.coversForbidTargetReasons[%d]: %q is not an allowed waiver reason (waivers.reasons)", i, r)
 		}
 	}
 

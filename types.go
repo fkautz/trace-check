@@ -35,9 +35,10 @@ type WaiverEntry struct {
 	ID           string
 	Reason       string
 	HasRationale bool
-	// Covers is the structured covered-by target ID (from the Covers field).
-	// Empty when the waiver does not use structured covers.
-	Covers string
+	// Covers holds the structured covered-by target IDs (from the Covers
+	// field, comma-separated). Empty when the waiver does not use structured
+	// covers. A covered-by composite may name several covering requirements.
+	Covers []string
 }
 
 // ClassEntry is one requirement's classification.

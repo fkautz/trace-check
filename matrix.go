@@ -185,8 +185,8 @@ func (c *Config) writeMultiColumnTable(b *strings.Builder, reqs []Requirement, t
 }
 
 func waiverCell(wv WaiverEntry) string {
-	if wv.Covers != "" {
-		return fmt.Sprintf("waiver: %s → %s", wv.Reason, wv.Covers)
+	if len(wv.Covers) > 0 {
+		return fmt.Sprintf("waiver: %s → %s", wv.Reason, strings.Join(wv.Covers, ", "))
 	}
 	return "waiver: " + wv.Reason
 }
@@ -268,8 +268,8 @@ type MatrixJSONTag struct {
 
 // MatrixJSONWaiver is a waiver summary.
 type MatrixJSONWaiver struct {
-	Reason string `json:"reason"`
-	Covers string `json:"covers,omitempty"`
+	Reason string   `json:"reason"`
+	Covers []string `json:"covers,omitempty"`
 }
 
 func (c *Config) renderMatrixJSON(reqs []Requirement, tags map[string][]TagRef, waived map[string]WaiverEntry) ([]byte, error) {

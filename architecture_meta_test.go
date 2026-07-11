@@ -1418,7 +1418,7 @@ func TestStrictCoveredByWaiverNeedsTaggedTarget(t *testing.T) {
 		Waivers: filepath.Join(root, "spec", "waivers.md"),
 		Strict:  true,
 	}, &out)
-	if err == nil || !strings.Contains(out.String(), "covered-by target REQ-CORE-002 has no tagged test for strict coverage") {
+	if err == nil || !strings.Contains(out.String(), "covered-by targets have no tagged test for strict coverage (REQ-CORE-002)") {
 		t.Fatalf("evidence-free covered-by accepted: %v\n%s", err, out.String())
 	}
 
@@ -1537,5 +1537,121 @@ func TestPolicyCoveredByWaiverNeedsRealCoverage(t *testing.T) {
 	err, out = run(t, true)
 	if err != nil {
 		t.Fatalf("covered-by with conformance-covered target should satisfy: %v\n%s", err, out)
+	}
+}
+
+// TestCoversMultipleTargets: a covered-by composite may name several covering
+// requirements in one comma-separated Covers line; every target is validated,
+// and a malformed or absent one is flagged individually.
+func TestCoversMultipleTargets(t *testing.T) {
+	cfg := Default()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	catalog := `# Catalog
+### REQ-CORE-001
+- Section: §1
+- Keyword: MUST
+### REQ-CORE-002
+- Section: §1
+- Keyword: MUST
+### REQ-CORE-003
+- Section: §1
+- Keyword: MUST
+`
+	tests := `package p
+import "testing"
+// Verifies: REQ-CORE-001
+func TestOne(t *testing.T) {}
+// Verifies: REQ-CORE-002
+func TestTwo(t *testing.T) {}
+`
+	// Two valid targets on one Covers line: no covers-target problems.
+	waivers := `### REQ-CORE-003
+- Reason: covered-by
+- Covers: REQ-CORE-001, REQ-CORE-002
+- Rationale: union of 001 and 002.
+`
+	root := writeRepo(t, catalog, tests, waivers)
+	var out strings.Builder
+	if err := Check(&cfg, Scope{Root: root, Catalog: filepath.Join(root, "spec", "requirements.md"), Waivers: filepath.Join(root, "spec", "waivers.md")}, &out); err != nil {
+		t.Fatalf("valid multi-target covered-by rejected: %v\n%s", err, out.String())
+	}
+
+	// One absent member in the list is flagged; the valid one is not.
+	waivers = `### REQ-CORE-003
+- Reason: covered-by
+- Covers: REQ-CORE-001, REQ-CORE-099
+- Rationale: 099 does not exist.
+`
+	root = writeRepo(t, catalog, tests, waivers)
+	out.Reset()
+	err := Check(&cfg, Scope{Root: root, Catalog: filepath.Join(root, "spec", "requirements.md"), Waivers: filepath.Join(root, "spec", "waivers.md")}, &out)
+	if err == nil || !strings.Contains(out.String(), "Covers target REQ-CORE-099 is not in the catalog") {
+		t.Fatalf("absent Covers target not flagged: %v\n%s", err, out.String())
+	}
+	if strings.Contains(out.String(), "REQ-CORE-001 is not in the catalog") {
+		t.Fatalf("valid target wrongly flagged\n%s", out.String())
+	}
+}
+
+// TestCoversForbidTargetReasons: a Covers target whose own waiver reason is in
+// coversForbidTargetReasons is flagged (a covered-by must point at an active
+// covering requirement, not one excused away, e.g. a retired one); off by
+// default.
+func TestCoversForbidTargetReasons(t *testing.T) {
+	catalog := `# Catalog
+### REQ-CORE-001
+- Section: §1
+- Keyword: MUST
+### REQ-CORE-002
+- Section: §1
+- Keyword: MUST
+`
+	// REQ-CORE-001 is covered-by REQ-CORE-002, but 002 is itself waived
+	// not-implemented (a placeholder, not real evidence).
+	waivers := `### REQ-CORE-001
+- Reason: covered-by
+- Covers: REQ-CORE-002
+- Rationale: points at a placeholder.
+
+### REQ-CORE-002
+- Reason: not-implemented
+- Rationale: no evidence yet.
+`
+	root := writeRepo(t, catalog, "", waivers)
+	scope := Scope{Root: root, Catalog: filepath.Join(root, "spec", "requirements.md"), Waivers: filepath.Join(root, "spec", "waivers.md")}
+
+	// Off by default: no forbid-target diagnostic.
+	cfg := Default()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	_ = Check(&cfg, scope, &out)
+	if strings.Contains(out.String(), "repoint to its successor") {
+		t.Fatalf("forbid-target fired while off by default:\n%s", out.String())
+	}
+
+	// Enabled: the not-implemented target is flagged.
+	cfg = Default()
+	cfg.Waivers.CoversForbidTargetReasons = []string{"not-implemented"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	err := Check(&cfg, scope, &out)
+	if err == nil || !strings.Contains(out.String(), "REQ-CORE-001: Covers target REQ-CORE-002 is not-implemented; repoint to its successor") {
+		t.Fatalf("forbidden Covers target not flagged: %v\n%s", err, out.String())
+	}
+}
+
+// TestCoversForbidTargetReasonsValidation: every coversForbidTargetReasons entry
+// must be an allowed waiver reason.
+func TestCoversForbidTargetReasonsValidation(t *testing.T) {
+	cfg := Default()
+	cfg.Waivers.CoversForbidTargetReasons = []string{"not-a-real-reason"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "coversForbidTargetReasons") {
+		t.Fatalf("want validation error for bad reason, got: %v", err)
 	}
 }

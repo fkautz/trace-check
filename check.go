@@ -135,7 +135,7 @@ func Check(cfg *Config, scope Scope, w io.Writer) (returnErr error) {
 		validReason[r] = true
 	}
 	waived := make(map[string]WaiverEntry, len(waivers))
-	coversEdges := map[string]string{} // waiver ID -> covers target
+	coversEdges := map[string][]string{} // waiver ID -> covers targets
 	for _, wv := range waivers {
 		if _, dup := waived[wv.ID]; dup {
 			problems = append(problems, fmt.Sprintf("%s: duplicate waiver", wv.ID))
@@ -155,27 +155,41 @@ func Check(cfg *Config, scope Scope, w io.Writer) (returnErr error) {
 			problems = append(problems, fmt.Sprintf("%s: has both a waiver and tagged tests (%s)", wv.ID, tags[wv.ID][0].Func))
 		}
 
-		// Structured covered-by.
+		// Structured covered-by. A covered-by composite may name several
+		// covering requirements (comma-separated Covers list).
 		isCoveredBy := wv.Reason == cfg.Waivers.CoveredByReason
-		if isCoveredBy && cfg.Waivers.RequireCoversForCoveredBy && wv.Covers == "" {
+		if isCoveredBy && cfg.Waivers.RequireCoversForCoveredBy && len(wv.Covers) == 0 {
 			problems = append(problems, fmt.Sprintf("%s: covered-by waiver has no %s line", wv.ID, cfg.Waivers.CoversField))
 		}
-		if wv.Covers != "" {
-			if !cfg.compiled.fullID.MatchString(wv.Covers) {
-				problems = append(problems, fmt.Sprintf("%s: %s target %q is not a well-formed requirement ID", wv.ID, cfg.Waivers.CoversField, wv.Covers))
-			} else if _, ok := known[wv.Covers]; !ok {
-				problems = append(problems, fmt.Sprintf("%s: %s target %s is not in the catalog", wv.ID, cfg.Waivers.CoversField, wv.Covers))
-			} else if wv.Covers == wv.ID {
+		if len(wv.Covers) > 0 && !isCoveredBy {
+			problems = append(problems, fmt.Sprintf("%s: has %s line but reason is %q (want %s)", wv.ID, cfg.Waivers.CoversField, wv.Reason, cfg.Waivers.CoveredByReason))
+		}
+		for _, tgt := range wv.Covers {
+			if !cfg.compiled.fullID.MatchString(tgt) {
+				problems = append(problems, fmt.Sprintf("%s: %s target %q is not a well-formed requirement ID", wv.ID, cfg.Waivers.CoversField, tgt))
+			} else if _, ok := known[tgt]; !ok {
+				problems = append(problems, fmt.Sprintf("%s: %s target %s is not in the catalog", wv.ID, cfg.Waivers.CoversField, tgt))
+			} else if tgt == wv.ID {
 				problems = append(problems, fmt.Sprintf("%s: %s target must not be itself", wv.ID, cfg.Waivers.CoversField))
 			} else {
-				coversEdges[wv.ID] = wv.Covers
-			}
-			if !isCoveredBy {
-				problems = append(problems, fmt.Sprintf("%s: has %s line but reason is %q (want %s)", wv.ID, cfg.Waivers.CoversField, wv.Reason, cfg.Waivers.CoveredByReason))
+				coversEdges[wv.ID] = append(coversEdges[wv.ID], tgt)
 			}
 		}
 	}
 	problems = append(problems, detectCoveredByCycles(coversEdges)...)
+	// A Covers target must not itself be excused away (e.g. superseded/retired):
+	// a covered-by must point at an active covering requirement. Second pass so
+	// `waived` is complete (a target may be defined later in the file). Iterated
+	// over the ordered waiver slice for deterministic diagnostics.
+	if len(cfg.Waivers.CoversForbidTargetReasons) > 0 {
+		for _, wv := range waivers {
+			for _, tgt := range wv.Covers {
+				if tw, ok := waived[tgt]; ok && stringIn(cfg.Waivers.CoversForbidTargetReasons, tw.Reason) {
+					problems = append(problems, fmt.Sprintf("%s: %s target %s is %s; repoint to its successor", wv.ID, cfg.Waivers.CoversField, tgt, tw.Reason))
+				}
+			}
+		}
+	}
 
 	covered := 0
 	for _, r := range reqs {
@@ -362,18 +376,25 @@ func (c *Config) strictWaiverProblem(wv WaiverEntry, tags map[string][]TagRef) s
 		return fmt.Sprintf("waiver reason %q does not satisfy strict coverage", wv.Reason)
 	}
 	if wv.Reason == c.Waivers.CoveredByReason {
-		if wv.Covers == "" {
+		if len(wv.Covers) == 0 {
 			return "covered-by waiver has no Covers target for strict coverage"
 		}
-		if len(tags[wv.Covers]) == 0 {
-			return fmt.Sprintf("covered-by target %s has no tagged test for strict coverage", wv.Covers)
+		hasCov := false
+		for _, tgt := range wv.Covers {
+			if len(tags[tgt]) > 0 {
+				hasCov = true
+				break
+			}
+		}
+		if !hasCov {
+			return fmt.Sprintf("covered-by targets have no tagged test for strict coverage (%s)", strings.Join(wv.Covers, ", "))
 		}
 	}
 	return ""
 }
 
 // detectCoveredByCycles reports cycles in the structured covered-by graph.
-func detectCoveredByCycles(edges map[string]string) []string {
+func detectCoveredByCycles(edges map[string][]string) []string {
 	if len(edges) == 0 {
 		return nil
 	}
@@ -388,13 +409,14 @@ func detectCoveredByCycles(edges map[string]string) []string {
 	visit = func(id string, path []string) {
 		color[id] = gray
 		path = append(path, id)
-		if next, ok := edges[id]; ok {
+		for _, next := range edges[id] {
 			switch color[next] {
 			case white:
 				visit(next, path)
 			case gray:
-				// cycle
-				cycle := append(path, next)
+				// cycle — fresh slice so the reported path is not aliased by
+				// sibling edges' appends.
+				cycle := append(append([]string{}, path...), next)
 				problems = append(problems, fmt.Sprintf("%s: covered-by cycle %s", id, strings.Join(cycle, " -> ")))
 			}
 		}
@@ -462,7 +484,14 @@ func (c *Config) waiverSatisfiesPolicy(waived map[string]WaiverEntry, tags map[s
 		return false
 	}
 	if wv.Reason == c.Waivers.CoveredByReason {
-		return wv.Covers != "" && hasCoverageClass(tags[wv.Covers], requiredClass)
+		// Evidence by proxy: at least one named covering target must itself
+		// carry a tag of the required coverage class.
+		for _, tgt := range wv.Covers {
+			if hasCoverageClass(tags[tgt], requiredClass) {
+				return true
+			}
+		}
+		return false
 	}
 	return true
 }
