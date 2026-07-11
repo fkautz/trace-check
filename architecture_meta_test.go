@@ -1655,3 +1655,48 @@ func TestCoversForbidTargetReasonsValidation(t *testing.T) {
 		t.Fatalf("want validation error for bad reason, got: %v", err)
 	}
 }
+
+// TestCoversExtraCatalog: a covered-by may point at a requirement defined in
+// another scope's catalog when that catalog is supplied via CoversExtraCatalogs
+// (cross-scope screening); without it, the target is flagged as absent.
+func TestCoversExtraCatalog(t *testing.T) {
+	cfg := Default()
+	cfg.Waivers.RequireCoversForCoveredBy = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	catalog := `# Catalog
+### REQ-CORE-001
+- Section: §1
+- Keyword: MUST
+`
+	waivers := `### REQ-CORE-001
+- Reason: covered-by
+- Covers: REQ-SRV-050
+- Rationale: implemented in the server scope.
+`
+	root := writeRepo(t, catalog, "", waivers)
+	extra := filepath.Join(root, "spec", "server-requirements.md")
+	if err := os.WriteFile(extra, []byte("# Server\n### REQ-SRV-050\n- Section: §1\n- Keyword: MUST\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := Scope{Root: root, Catalog: filepath.Join(root, "spec", "requirements.md"), Waivers: filepath.Join(root, "spec", "waivers.md")}
+
+	// Without the extra catalog, the cross-scope target is flagged absent.
+	var out strings.Builder
+	if err := Check(&cfg, base, &out); err == nil || !strings.Contains(out.String(), "Covers target REQ-SRV-050 is not in the catalog") {
+		t.Fatalf("cross-scope target should be flagged without extra catalog: %v\n%s", err, out.String())
+	}
+
+	// With the extra catalog, it is accepted (and REQ-SRV-050 is not itself a
+	// requirement to cover in this scope).
+	withExtra := base
+	withExtra.CoversExtraCatalogs = []string{extra}
+	out.Reset()
+	if err := Check(&cfg, withExtra, &out); err != nil {
+		t.Fatalf("cross-scope target rejected with extra catalog: %v\n%s", err, out.String())
+	}
+	if strings.Contains(out.String(), "REQ-SRV-050") {
+		t.Fatalf("extra-catalog id leaked into this scope's problems:\n%s", out.String())
+	}
+}

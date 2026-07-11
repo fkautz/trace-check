@@ -134,6 +134,11 @@ target whose own waiver reason is in that list — a covered-by must point at an
 active covering requirement, not one that was itself excused away (a retired /
 superseded id, or a not-implemented placeholder).
 
+When a covered-by is covered by a requirement defined in another scope's catalog
+(cross-scope screening — e.g. a core waiver satisfied by server requirements),
+pass those catalogs with `-covers-extra-catalog a.md,b.md`: their IDs become valid
+`Covers` targets without being loaded as requirements to cover or into the matrix.
+
 ### Multiple scopes
 
 One dialect can validate several catalogs (e.g. a core and a server catalog).

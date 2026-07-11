@@ -37,6 +37,11 @@ type Scope struct {
 	// ArchitecturePath overrides Config.Architecture.Path when non-empty
 	// (absolute, or resolved by the caller relative to Root).
 	ArchitecturePath string
+	// CoversExtraCatalogs are additional catalog paths whose IDs are accepted
+	// as valid structured-Covers targets, without being loaded as requirements
+	// to cover or into the matrix. Lets a covered-by in one scope point at a
+	// requirement defined in another scope's catalog (cross-scope screening).
+	CoversExtraCatalogs []string
 }
 
 // ScopeError reports invalid CLI/profile/programmatic scope configuration.
@@ -112,6 +117,31 @@ func Check(cfg *Config, scope Scope, w io.Writer) (returnErr error) {
 		catalogSeries[cfg.seriesOf(r.ID)] = true
 	}
 
+	// coversKnown is the set of IDs valid as structured-Covers targets: this
+	// scope's catalog plus any CoversExtraCatalogs (other scopes), so a
+	// covered-by can point at a requirement defined in another scope. Extra
+	// catalog IDs are NOT requirements to cover and never enter the matrix; the
+	// extra catalog's own content problems belong to its own scope run.
+	coversKnown := known
+	if len(scope.CoversExtraCatalogs) > 0 {
+		coversKnown = make(map[string]Requirement, len(known))
+		for id, r := range known {
+			coversKnown[id] = r
+		}
+		for _, extra := range scope.CoversExtraCatalogs {
+			ereqs, _, err := parseCatalogWithRead(cfg, extra, inputs.readFile)
+			if err != nil {
+				problems = append(problems, fmt.Sprintf("covers-extra-catalog %s: %v", extra, err))
+				continue
+			}
+			for _, r := range ereqs {
+				if _, ok := coversKnown[r.ID]; !ok {
+					coversKnown[r.ID] = r
+				}
+			}
+		}
+	}
+
 	for _, r := range reqs {
 		if r.Class == "" {
 			problems = append(problems, fmt.Sprintf("%s: missing or unclassifiable Keyword line in catalog", r.ID))
@@ -167,7 +197,7 @@ func Check(cfg *Config, scope Scope, w io.Writer) (returnErr error) {
 		for _, tgt := range wv.Covers {
 			if !cfg.compiled.fullID.MatchString(tgt) {
 				problems = append(problems, fmt.Sprintf("%s: %s target %q is not a well-formed requirement ID", wv.ID, cfg.Waivers.CoversField, tgt))
-			} else if _, ok := known[tgt]; !ok {
+			} else if _, ok := coversKnown[tgt]; !ok {
 				problems = append(problems, fmt.Sprintf("%s: %s target %s is not in the catalog", wv.ID, cfg.Waivers.CoversField, tgt))
 			} else if tgt == wv.ID {
 				problems = append(problems, fmt.Sprintf("%s: %s target must not be itself", wv.ID, cfg.Waivers.CoversField))
@@ -351,6 +381,13 @@ func freezeCheckScopePaths(scope Scope) (Scope, error) {
 			return Scope{}, err
 		}
 		*item.path = resolved
+	}
+	for i, p := range scope.CoversExtraCatalogs {
+		resolved, err := absoluteInput("covers-extra-catalog", p)
+		if err != nil {
+			return Scope{}, err
+		}
+		scope.CoversExtraCatalogs[i] = resolved
 	}
 	if scope.Out != "" {
 		scope.Out = resolveScopePath(scope.Root, scope.Out)

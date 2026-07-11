@@ -130,6 +130,8 @@ FLAGS
   -classification PATH  classification path, relative to -root (absent: dormant)
   -waivers PATH         waivers path, relative to -root (absent: none)
   -architecture PATH    architecture registry, relative to -root (overrides config)
+  -covers-extra-catalog LIST  comma-separated extra catalogs (relative to -root)
+                        whose IDs are valid Covers targets (cross-scope covered-by)
   -out PATH             matrix output, relative to -root; empty disables
   -out-json PATH        machine-readable matrix JSON; empty disables
   -problems-json PATH   deterministic diagnostics JSON, written even on failure
