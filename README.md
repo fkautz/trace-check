@@ -1,10 +1,15 @@
 # trace-check
 
-A dialect-agnostic **requirement traceability checker**. It reconciles a
-requirements catalog against the tests that claim to cover it, the waivers that
-excuse the rest, and an optional per-requirement classification — then
-regenerates a traceability matrix. When the four artifacts drift, it fails
-loudly and names the requirement at fault.
+This repository ships two complementary commands under `cmd/`:
+
+- `trace-check`, a dialect-agnostic **requirement traceability checker**; and
+- `cohesion-check`, a read-only validator for reviewed component-internal
+  composition receipts.
+
+`trace-check` reconciles a requirements catalog against the tests that claim to
+cover it, the waivers that excuse the rest, and an optional per-requirement
+classification — then regenerates a traceability matrix. When the artifacts
+drift, it fails loudly and names the requirement at fault.
 
 It started life as a project-specific tool and was extracted to be reusable:
 how requirement IDs are shaped, how the catalog markdown is laid out, what tag
@@ -15,6 +20,7 @@ all come from a JSON config. With no config it uses built-in defaults.
 
 ```
 go install github.com/fkautz/trace-check/cmd/trace-check@latest
+go install github.com/fkautz/trace-check/cmd/cohesion-check@latest
 ```
 
 Or use it as a library:
@@ -318,6 +324,48 @@ be usable as an LLM skill without running the binary.
 
 A complete worked example in a non-Go dialect lives in
 [`testdata/rust-project`](testdata/rust-project).
+
+## Component cohesion receipts
+
+`cohesion-check` is deliberately separate from requirement coverage. It never
+adds a tag, closes a strict backlog key, or treats a waiver as implementation
+evidence. Instead, it validates a versioned `cohesion.json` receipt against the
+same live catalog, architecture registry, and tag collectors used by
+`trace-check`, plus the repository's Go AST:
+
+- every certified island names real production callables and exact tests that
+  are currently tagged for its cited requirements;
+- every cohesive operation orders at least two islands, names an exported
+  authoritative entrypoint, an existing golden-path test, and a human-reviewed
+  publish point;
+- delegates must still exist, retired callables must be gone, and intentionally
+  public primitives carry rationales; and
+- unclassified AST-inferable exported callables, `compose-needed`/`blocked`
+  status, and a requirement-tagged golden-path test are advisories by default.
+
+The checker does not infer call graphs or claim that AST presence proves stage
+order, fail-closed behavior, thin delegation, or single publication. Those
+claims—including that a named test actually invokes a named symbol—remain
+test/mutation evidence and review responsibilities. Receipts pin GOOS, GOARCH,
+cgo selection, build tags, Go release tags, compiler tags, and tool-experiment
+tags so source selection does not silently vary with the host; explicit CLI
+overrides support deliberate cross-target audits. The advisory export inventory
+covers declared functions/methods, direct interface methods, and AST-inferable
+function variables; it is not a type-checked API graph. Run
+`cohesion-check -help` for the complete schema, validation rules, JSON output,
+checkpoint flags, and examples.
+
+Typical use:
+
+```sh
+cohesion-check -config tracecheck.json
+cohesion-check -config tracecheck.json -require-component materializer
+cohesion-check -config tracecheck.json -warnings-as-errors
+```
+
+`-require-component` makes a named checkpoint fail when that component has no
+receipt. `-warnings-as-errors` is an opt-in ratchet for projects whose export
+classification is mature; advisory mode is the safe rollout default.
 
 ## License
 
