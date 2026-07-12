@@ -60,7 +60,7 @@ func TestRunVersionAndHelp(t *testing.T) {
 	if code := run([]string{"help"}, &stdout, &stderr, nil); code != 0 {
 		t.Fatalf("help run() = %d; stderr=%q", code, stderr.String())
 	}
-	for _, want := range []string{"RECEIPT SCHEMA", "NON-GOALS", "-warnings-as-errors", "-require-component", "-goos"} {
+	for _, want := range []string{"RECEIPT SCHEMA", "NON-GOALS", "-warnings-as-errors", "-require-classified-exports", "-require-component", "-goos"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("help output missing %q", want)
 		}

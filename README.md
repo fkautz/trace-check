@@ -342,7 +342,9 @@ same live catalog, architecture registry, and tag collectors used by
   publish point;
 - delegates must still exist, retired callables must be gone, and intentionally
   public primitives carry rationales; and
-- unclassified AST-inferable exported callables, `compose-needed`/`blocked`
+- exported certified islands without a permanent entrypoint/delegate/primitive
+  role are reported separately as `public-island` debt, while other
+  unclassified AST-inferable exported callables, `compose-needed`/`blocked`
   status, and a requirement-tagged golden-path test are advisories by default.
 
 The checker does not infer call graphs or claim that AST presence proves stage
@@ -362,12 +364,15 @@ Typical use:
 ```sh
 cohesion-check -config tracecheck.json
 cohesion-check -config tracecheck.json -require-component materializer
+cohesion-check -config tracecheck.json -require-classified-exports
 cohesion-check -config tracecheck.json -warnings-as-errors
 ```
 
 `-require-component` makes a named checkpoint fail when that component has no
-receipt. `-warnings-as-errors` is an opt-in ratchet for projects whose export
-classification is mature; advisory mode is the safe rollout default.
+receipt. `-require-classified-exports` fails only truly unclassified exports,
+allowing projects to ratchet a complete inventory while `public-island` and
+`compose-needed` debt remains advisory. `-warnings-as-errors` promotes every
+advisory after the full cohesion rollout is mature.
 
 ## License
 

@@ -390,10 +390,49 @@ func TestCheckCohesionAdvisoriesCanBeRatchetEnforced(t *testing.T) {
 		t.Fatalf("missing advisories:\n%s", got)
 	}
 
+	scope.RequireClassifiedExports = true
+	out.Reset()
+	if err := CheckCohesion(cfg, scope, &out); err == nil {
+		t.Fatalf("classified-export ratchet accepted Helper:\n%s", out.String())
+	}
+	scope.RequireClassifiedExports = false
+
 	scope.WarningsAsErrors = true
 	out.Reset()
 	if err := CheckCohesion(cfg, scope, &out); err == nil {
 		t.Fatalf("warnings-as-errors accepted advisories:\n%s", out.String())
+	}
+}
+
+func TestCheckCohesionDistinguishesPublicIslandsFromUnclassifiedExports(t *testing.T) {
+	receipt := strings.Replace(validCohesionReceipt,
+		`        {
+          "symbol": {"package": "internal/alpha", "name": "First"},
+          "rationale": "leaf primitive retained for focused callers"
+        },
+`, "", 1)
+	receipt = strings.Replace(receipt,
+		`        {
+          "symbol": {"package": "internal/alpha", "name": "Service.Second"},
+          "rationale": "leaf primitive retained for focused callers"
+        },
+`, "", 1)
+
+	cfg, scope := writeCohesionRepo(t, receipt)
+	scope.RequireClassifiedExports = true
+	var out strings.Builder
+	if err := CheckCohesion(cfg, scope, &out); err != nil {
+		t.Fatalf("public-island advisory run failed: %v\n%s", err, out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "WARNING [public-island]") ||
+		!strings.Contains(got, "First (island first)") ||
+		!strings.Contains(got, "Service.Second (island second)") {
+		t.Fatalf("missing public-island classification:\n%s", got)
+	}
+	if strings.Contains(got, "unclassified exported callables: First") ||
+		strings.Contains(got, "unclassified exported callable First") {
+		t.Fatalf("certified islands reported as unclassified exports:\n%s", got)
 	}
 }
 

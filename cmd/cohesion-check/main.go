@@ -43,6 +43,7 @@ func run(args []string, stdout, stderr io.Writer, buildInfo *debug.BuildInfo) in
 	goarch := fs.String("goarch", "", "override receipt Go target architecture for this audit")
 	buildTags := fs.String("tags", "", "override receipt Go build tags with a comma-separated list")
 	warningsAsErrors := fs.Bool("warnings-as-errors", false, "fail advisory findings as well as receipt errors")
+	requireClassifiedExports := fs.Bool("require-classified-exports", false, "fail exported callables absent from islands, operations, delegates, or rationalized primitives")
 	format := fs.String("format", "text", "report format: text or json")
 	showVersion := fs.Bool("version", false, "print module/build version and available VCS provenance")
 	var requiredComponents stringListFlag
@@ -85,14 +86,15 @@ func run(args []string, stdout, stderr io.Writer, buildInfo *debug.BuildInfo) in
 	}
 
 	scope := tracecheck.CohesionScope{
-		Root:              *root,
-		Catalog:           *catalog,
-		Receipt:           *receipt,
-		ArchitecturePath:  *architecture,
-		RequireComponents: []string(requiredComponents),
-		WarningsAsErrors:  *warningsAsErrors,
-		GOOS:              *goos,
-		GOARCH:            *goarch,
+		Root:                     *root,
+		Catalog:                  *catalog,
+		Receipt:                  *receipt,
+		ArchitecturePath:         *architecture,
+		RequireComponents:        []string(requiredComponents),
+		WarningsAsErrors:         *warningsAsErrors,
+		RequireClassifiedExports: *requireClassifiedExports,
+		GOOS:                     *goos,
+		GOARCH:                   *goarch,
 	}
 	tagsFlagSet := false
 	fs.Visit(func(visited *flag.Flag) {
@@ -208,6 +210,8 @@ FLAGS
   -goarch GOARCH            override receipt Go target architecture for this audit
   -tags TAGS                override receipt Go build tags; empty clears them
   -require-component NAME   require NAME in this checkpoint; repeat or comma-separate
+  -require-classified-exports  fail truly unclassified exported callables while
+                            leaving public-island and component-status debt advisory
   -warnings-as-errors       promote advisories to a failing exit status
   -format text|json         deterministic report format (default text)
   -version                  print build provenance
@@ -273,16 +277,20 @@ RECEIPT SCHEMA (version 1, abbreviated)
   in an ordered operation stage list. An operation has at least two distinct
   stages, one exported entrypoint, one existing golden-path test, and a named
   publish point. Delegates must exist; retired callables must not. Exported
-  callables that are not an entrypoint, delegate, or rationalized primitive
-  are advisory findings. Exported island functions are not automatically
-  blessed as permanent primitives.
+  certified-island callables without an entrypoint, delegate, or rationalized
+  primitive role receive a public-island advisory: the receipt classifies the
+  current surface without blessing it as permanent. Other exported callables
+  lacking one of those roles receive an unclassified-export advisory.
 
 ADVISORIES
-  compose-needed or blocked status, unclassified exported callables, an
-  incomplete island inventory, and a requirement-tagged golden-path test are
-  advisory by default. Use -warnings-as-errors only after reviewing and
-  ratcheting the component's receipt. -require-component makes a named
-  checkpoint fail if the receipt omits that component.
+  compose-needed or blocked status, exported public islands, unclassified
+  exported callables, an incomplete island inventory, and a
+  requirement-tagged golden-path test are advisory by default. Use
+  -warnings-as-errors only after reviewing and ratcheting the component's
+  receipt. -require-component makes a named checkpoint fail if the receipt
+  omits that component. -require-classified-exports selectively promotes only
+  unclassified-export findings, so a project can ratchet its inventory while
+  composition debt remains visible and non-failing.
 
 NON-GOALS
   Go AST presence cannot prove runtime call order, thin delegation, absence of

@@ -106,9 +106,13 @@ type CohesionScope struct {
 	ArchitecturePath  string
 	RequireComponents []string
 	WarningsAsErrors  bool
-	GOOS              string
-	GOARCH            string
-	BuildTags         []string
+	// RequireClassifiedExports promotes only unclassified-export findings to
+	// errors while leaving reviewed rollout debt such as public islands and a
+	// compose-needed status advisory.
+	RequireClassifiedExports bool
+	GOOS                     string
+	GOARCH                   string
+	BuildTags                []string
 }
 
 // CohesionFinding is one deterministic receipt error or advisory.
@@ -317,7 +321,7 @@ func InspectCohesion(cfg *Config, scope CohesionScope) (CohesionReport, error) {
 		if name != "" && !arch.HasComponent(name) {
 			report.add(CohesionError, "unknown-component", name, "", fmt.Sprintf("component %q is not registered in the architecture", name))
 		}
-		inspectCohesionComponent(rootAbs, buildContext, arch, requirements, tags, taggedTests, component, &report, inventories, inventoryErrors)
+		inspectCohesionComponent(rootAbs, buildContext, arch, requirements, tags, taggedTests, component, &report, inventories, inventoryErrors, scope.RequireClassifiedExports)
 	}
 
 	for _, required := range scope.RequireComponents {
@@ -352,6 +356,7 @@ func inspectCohesionComponent(
 	report *CohesionReport,
 	inventories map[string]goPackageInventory,
 	inventoryErrors map[string]error,
+	requireClassifiedExports bool,
 ) {
 	name := strings.TrimSpace(component.Component)
 	status := strings.TrimSpace(component.Status)
@@ -432,6 +437,7 @@ func inspectCohesionComponent(
 	}
 
 	islandNames := map[string]bool{}
+	exportedIslands := map[string][]string{}
 	evidenceOwners := map[string]string{}
 	for _, island := range component.Islands {
 		islandName := strings.TrimSpace(island.Name)
@@ -453,7 +459,13 @@ func inspectCohesionComponent(
 				continue
 			}
 			seenSymbols[key] = true
-			validateSymbol(ref, false, fmt.Sprintf("island %q", islandName), "")
+			if validateSymbol(ref, false, fmt.Sprintf("island %q", islandName), "") {
+				pkg := filepath.ToSlash(strings.TrimSpace(ref.Package))
+				symbol := strings.TrimSpace(ref.Name)
+				if info, ok := inventories[pkg].Symbols[symbol]; ok && info.Exported && islandName != "" {
+					exportedIslands[key] = append(exportedIslands[key], islandName)
+				}
+			}
 		}
 		if len(island.Evidence) == 0 {
 			report.add(CohesionError, "island-evidence", name, "", fmt.Sprintf("island %q has no tagged-test evidence", islandName))
@@ -636,17 +648,37 @@ func inspectCohesionComponent(
 		if !ok {
 			continue
 		}
+		var publicIslands []string
 		var unclassified []string
 		for _, symbol := range inventory.Exported {
 			key := pkg + ":" + symbol
 			if _, classified := classifiedExports[key]; !classified {
-				unclassified = append(unclassified, symbol)
+				islands := append([]string(nil), exportedIslands[key]...)
+				if len(islands) == 0 {
+					unclassified = append(unclassified, symbol)
+					continue
+				}
+				sort.Strings(islands)
+				if len(islands) == 1 {
+					publicIslands = append(publicIslands, fmt.Sprintf("%s (island %s)", symbol, islands[0]))
+				} else {
+					publicIslands = append(publicIslands, fmt.Sprintf("%s (islands %s)", symbol, strings.Join(islands, ", ")))
+				}
 			}
 		}
+		if len(publicIslands) == 1 {
+			report.add(CohesionWarning, "public-island", name, "", fmt.Sprintf("package %s has exported certified island callable without an entrypoint, delegate, or primitive role: %s", pkg, publicIslands[0]))
+		} else if len(publicIslands) > 1 {
+			report.add(CohesionWarning, "public-island", name, "", fmt.Sprintf("package %s has exported certified island callables without an entrypoint, delegate, or primitive role: %s", pkg, strings.Join(publicIslands, ", ")))
+		}
+		unclassifiedSeverity := CohesionWarning
+		if requireClassifiedExports {
+			unclassifiedSeverity = CohesionError
+		}
 		if len(unclassified) == 1 {
-			report.add(CohesionWarning, "unclassified-export", name, "", fmt.Sprintf("package %s has unclassified exported callable %s", pkg, unclassified[0]))
+			report.add(unclassifiedSeverity, "unclassified-export", name, "", fmt.Sprintf("package %s has unclassified exported callable %s", pkg, unclassified[0]))
 		} else if len(unclassified) > 1 {
-			report.add(CohesionWarning, "unclassified-export", name, "", fmt.Sprintf("package %s has unclassified exported callables: %s", pkg, strings.Join(unclassified, ", ")))
+			report.add(unclassifiedSeverity, "unclassified-export", name, "", fmt.Sprintf("package %s has unclassified exported callables: %s", pkg, strings.Join(unclassified, ", ")))
 		}
 	}
 }
