@@ -219,8 +219,8 @@ type PolicyConfig struct {
 	// StrictRequiresCoverageClass). Default: covered-by, documented-deviation —
 	// a deliberate excusal counts at freeze time, but a not-implemented
 	// placeholder does not. The covered-by reason is evidence by proxy: it
-	// only satisfies when the waiver's Covers target itself carries a tag of
-	// the required coverage class. An explicit empty array means no waiver
+	// only satisfies when every waiver Covers target carries a tag of the
+	// required coverage class. An explicit empty array means no waiver
 	// satisfies a policy coverage requirement. Every entry must be an allowed
 	// waiver reason (waivers.reasons).
 	WaiverReasonsSatisfy []string `json:"waiverReasonsSatisfy"`
@@ -251,7 +251,7 @@ type StrictConfig struct {
 	// WaiverReasonsSatisfy controls which waiver reasons satisfy base strict
 	// coverage. Nil (omitted) preserves the legacy behavior where any valid
 	// waiver satisfies. An explicit empty list means no waiver satisfies. A
-	// covered-by reason also requires its Covers target to carry a tagged test.
+	// covered-by reason also requires every Covers target to carry a tagged test.
 	WaiverReasonsSatisfy []string `json:"waiverReasonsSatisfy"`
 }
 

@@ -1445,6 +1445,72 @@ func TestTarget(t *testing.T) {}
 	}
 }
 
+func TestStrictMultiTargetCoveredByRequiresEveryTargetTagged(t *testing.T) {
+	cfg := Default()
+	cfg.Waivers.RequireCoversForCoveredBy = true
+	cfg.Strict.WaiverReasonsSatisfy = []string{"covered-by", "documented-deviation"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	catalog := `# Catalog
+### REQ-CORE-001
+- Section: §1
+- Keyword: MUST
+
+### REQ-CORE-002
+- Section: §1
+- Keyword: MUST
+
+### REQ-CORE-003
+- Section: §1
+- Keyword: MUST
+`
+	waivers := `# Waivers
+### REQ-CORE-002
+- Reason: documented-deviation
+- Rationale: isolate the composite proxy check.
+
+### REQ-CORE-003
+- Reason: covered-by
+- Covers: REQ-CORE-001, REQ-CORE-002
+- Rationale: union of both target requirements.
+`
+	root := writeRepo(t, catalog, `package p
+import "testing"
+// Verifies: REQ-CORE-001
+func TestOne(t *testing.T) {}
+`, waivers)
+	var out strings.Builder
+	err := Check(&cfg, Scope{
+		Root: root, Catalog: filepath.Join(root, "spec", "requirements.md"),
+		Waivers: filepath.Join(root, "spec", "waivers.md"), Strict: true,
+	}, &out)
+	if err == nil || !strings.Contains(out.String(), "covered-by targets have no tagged test for strict coverage (REQ-CORE-002)") {
+		t.Fatalf("multi-target covered-by accepted with one untagged constituent: %v\n%s", err, out.String())
+	}
+
+	mustWriteFile(t, root, "pkg_test.go", `package p
+import "testing"
+// Verifies: REQ-CORE-001
+func TestOne(t *testing.T) {}
+// Verifies: REQ-CORE-002
+func TestTwo(t *testing.T) {}
+`)
+	mustWriteFile(t, root, "spec/waivers.md", `# Waivers
+### REQ-CORE-003
+- Reason: covered-by
+- Covers: REQ-CORE-001, REQ-CORE-002
+- Rationale: union of both target requirements.
+`)
+	out.Reset()
+	if err := Check(&cfg, Scope{
+		Root: root, Catalog: filepath.Join(root, "spec", "requirements.md"),
+		Waivers: filepath.Join(root, "spec", "waivers.md"), Strict: true,
+	}, &out); err != nil {
+		t.Fatalf("fully tagged multi-target covered-by rejected: %v\n%s", err, out.String())
+	}
+}
+
 func TestStrictWaiverReasonsSatisfyValidation(t *testing.T) {
 	cfg := Default()
 	cfg.Strict.WaiverReasonsSatisfy = []string{"no-such-reason"}
@@ -1537,6 +1603,61 @@ func TestPolicyCoveredByWaiverNeedsRealCoverage(t *testing.T) {
 	err, out = run(t, true)
 	if err != nil {
 		t.Fatalf("covered-by with conformance-covered target should satisfy: %v\n%s", err, out)
+	}
+}
+
+func TestPolicyMultiTargetCoveredByRequiresClassOnEveryTarget(t *testing.T) {
+	catalog := `# Catalog
+### REQ-CORE-001
+- Section: §1
+- Keyword: MUST
+- Kind: encoding
+### REQ-CORE-002
+- Section: §1
+- Keyword: MUST
+- Kind: encoding
+### REQ-CORE-003
+- Section: §1
+- Keyword: MUST
+- Kind: encoding
+`
+	waivers := `# Waivers
+### REQ-CORE-003
+- Reason: covered-by
+- Covers: REQ-CORE-001, REQ-CORE-002
+- Rationale: union of both encoding requirements.
+`
+	cfg := policyWaiverCfg(t)
+	root := writeRepo(t, catalog, `package p
+import "testing"
+// Verifies: REQ-CORE-002
+func TestUnitTwo(t *testing.T) {}
+`, waivers)
+	mustWriteFile(t, root, "conformance/one_test.go", `package conformance
+import "testing"
+// Verifies: REQ-CORE-001
+func TestConfOne(t *testing.T) {}
+`)
+	var out strings.Builder
+	err := Check(&cfg, Scope{
+		Root: root, Catalog: filepath.Join(root, "spec", "requirements.md"),
+		Waivers: filepath.Join(root, "spec", "waivers.md"), Strict: true,
+	}, &out)
+	if err == nil || !strings.Contains(out.String(), "REQ-CORE-003 (§1): policy requires conformance coverage") {
+		t.Fatalf("multi-target covered-by accepted with one wrong-class constituent: %v\n%s", err, out.String())
+	}
+
+	mustWriteFile(t, root, "conformance/two_test.go", `package conformance
+import "testing"
+// Verifies: REQ-CORE-002
+func TestConfTwo(t *testing.T) {}
+`)
+	out.Reset()
+	if err := Check(&cfg, Scope{
+		Root: root, Catalog: filepath.Join(root, "spec", "requirements.md"),
+		Waivers: filepath.Join(root, "spec", "waivers.md"), Strict: true,
+	}, &out); err != nil {
+		t.Fatalf("fully classed multi-target covered-by rejected: %v\n%s", err, out.String())
 	}
 }
 

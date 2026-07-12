@@ -116,11 +116,11 @@ Architecture file shape:
 Waivers vs. policy rules: for backward compatibility, an omitted
 `strict.waiverReasonsSatisfy` lets any valid waiver satisfy base `-strict`
 coverage. Set it to the deliberate-excusal reasons a release gate accepts (or
-to `[]` to accept none). A configured `covered-by` reason only counts when its
-`Covers` target carries an actual tag. Separately, a
+to `[]` to accept none). A configured `covered-by` reason only counts when
+every named `Covers` target carries an actual tag. Separately, a
 `strictRequiresCoverageClass` rule is satisfied only by reasons in
 `policy.waiverReasonsSatisfy` — by default `covered-by` and
-`documented-deviation` — and covered-by's target must carry that required
+`documented-deviation` — and every covered-by target must carry that required
 coverage class.
 
 Structured covered-by (optional but recommended):
@@ -133,7 +133,9 @@ Structured covered-by (optional but recommended):
 ```
 
 `Covers` is a comma-separated list, so a composite may name every covering
-requirement; each is checked (well-formed, in the catalog, not itself, no cycle).
+requirement. Each target is checked for structure (well-formed, in the catalog,
+not itself, no cycle), and strict coverage requires evidence for every target;
+one covered constituent cannot stand in for the rest.
 Set `waivers.requireCoversForCoveredBy` to require the `Covers` line. Set
 `waivers.coversForbidTargetReasons` (e.g. `["superseded"]`) to flag a `Covers`
 target whose own waiver reason is in that list — a covered-by must point at an

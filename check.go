@@ -403,8 +403,8 @@ func freezeCheckScopePaths(scope Scope) (Scope, error) {
 
 // strictWaiverProblem returns why a waiver does not satisfy base strict
 // coverage, or an empty string when it does. A nil allowlist preserves legacy
-// behavior. covered-by remains evidence by proxy and needs an actual tagged
-// target even when no coverage-class policy applies.
+// behavior. covered-by remains evidence by proxy and needs every target tagged
+// even when no coverage-class policy applies.
 func (c *Config) strictWaiverProblem(wv WaiverEntry, tags map[string][]TagRef) string {
 	if c.Strict.WaiverReasonsSatisfy == nil {
 		return ""
@@ -416,15 +416,14 @@ func (c *Config) strictWaiverProblem(wv WaiverEntry, tags map[string][]TagRef) s
 		if len(wv.Covers) == 0 {
 			return "covered-by waiver has no Covers target for strict coverage"
 		}
-		hasCov := false
+		var missing []string
 		for _, tgt := range wv.Covers {
-			if len(tags[tgt]) > 0 {
-				hasCov = true
-				break
+			if len(tags[tgt]) == 0 {
+				missing = append(missing, tgt)
 			}
 		}
-		if !hasCov {
-			return fmt.Sprintf("covered-by targets have no tagged test for strict coverage (%s)", strings.Join(wv.Covers, ", "))
+		if len(missing) > 0 {
+			return fmt.Sprintf("covered-by targets have no tagged test for strict coverage (%s)", strings.Join(missing, ", "))
 		}
 	}
 	return ""
@@ -511,24 +510,27 @@ func (c *Config) checkPolicyRules(scope Scope, reqs []Requirement, tags map[stri
 // waiverSatisfiesPolicy reports whether id carries a waiver whose reason is a
 // deliberate excusal (Policy.WaiverReasonsSatisfy) that counts against a
 // StrictRequiresCoverageClass obligation for requiredClass. A covered-by
-// waiver is only evidence by proxy: it satisfies the obligation only when its
-// structured Covers target itself carries a tag of the required coverage
-// class — otherwise a bare covered-by would pass a freeze rule with no actual
-// coverage behind it.
+// waiver is only evidence by proxy: it satisfies the obligation only when
+// every structured Covers target carries a tag of the required coverage class
+// — otherwise a partial covered-by would pass a freeze rule without evidence
+// for every constituent.
 func (c *Config) waiverSatisfiesPolicy(waived map[string]WaiverEntry, tags map[string][]TagRef, id, requiredClass string) bool {
 	wv, ok := waived[id]
 	if !ok || !stringIn(c.Policy.WaiverReasonsSatisfy, wv.Reason) {
 		return false
 	}
 	if wv.Reason == c.Waivers.CoveredByReason {
-		// Evidence by proxy: at least one named covering target must itself
-		// carry a tag of the required coverage class.
+		// Evidence by proxy: every named constituent of the composite must
+		// itself carry a tag of the required coverage class.
+		if len(wv.Covers) == 0 {
+			return false
+		}
 		for _, tgt := range wv.Covers {
-			if hasCoverageClass(tags[tgt], requiredClass) {
-				return true
+			if !hasCoverageClass(tags[tgt], requiredClass) {
+				return false
 			}
 		}
-		return false
+		return true
 	}
 	return true
 }
